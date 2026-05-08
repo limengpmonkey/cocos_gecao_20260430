@@ -89,7 +89,7 @@
         "_value": false
       },
       "tween": {
-        "_value": false
+        "_value": true
       },
       "terrain": {
         "_value": false
@@ -126,11 +126,15 @@
       "physics-builtin",
       "primitive",
       "profiler",
+      "tween",
       "ui"
     ],
     "noDeprecatedFeatures": {
       "value": false,
       "version": ""
     }
+  },
+  "macroConfig": {
+    "ENABLE_TRANSPARENT_CANVAS": true
   }
 }

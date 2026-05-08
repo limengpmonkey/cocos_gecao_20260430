@@ -24,6 +24,7 @@ export class Joystick extends Component {
     activeRange: number = 0.1; //摇杆触发范围比例（0-1）
 
     private joystickCB: Function | null = null;
+    private _inputEnabled: boolean = true;
 
     public touchID: number | null = -1;
 
@@ -50,8 +51,28 @@ export class Joystick extends Component {
         this.joystickCB = cb;
     }
 
+    setInputEnabled(enabled: boolean) {
+        if (this._inputEnabled === enabled) {
+            return;
+        }
+
+        this._inputEnabled = enabled;
+        if (!enabled) {
+            this.release();
+        }
+    }
+
     show(flag: boolean) {
         this.round.active = flag;
+    }
+
+    release() {
+        this.touchID = -1;
+        this.show(this.isStatic);
+        this.inner.position = new Vec3();
+
+        const data = { type: Input.EventType.TOUCH_END, active: false, angle: 0, ratio: 0 };
+        this.joystickCB && this.joystickCB(data);
     }
 
 
@@ -88,6 +109,7 @@ export class Joystick extends Component {
 
 
     touchStart(event: EventTouch) {
+        if (!this._inputEnabled) return false;
 
         if (this.touchID == -1) {
             this.touchID = event.getID();
@@ -109,6 +131,7 @@ export class Joystick extends Component {
     }
 
     touchMove(event: EventTouch) {
+        if (!this._inputEnabled) return false;
         if (this.touchID != event.getID()) return false;
         let data: any = this.innerPosition(event.getUILocation());
         data.type = Input.EventType.TOUCH_MOVE;
@@ -119,14 +142,10 @@ export class Joystick extends Component {
 
 
     touchEnd(event: EventTouch) {//摇杆弹回原位置
+        if (!this._inputEnabled) return false;
         if (this.touchID != event.getID()) return false;
 
-        this.touchID = -1;
-        this.show(this.isStatic);
-
-        this.inner.position = new Vec3();
-        let data = { type: Input.EventType.TOUCH_END, active: false, angle: 0, ratio: 0 }
-        this.joystickCB && this.joystickCB(data);
+        this.release();
 
         return true;
     }
