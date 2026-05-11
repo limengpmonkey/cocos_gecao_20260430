@@ -1,73 +1,72 @@
-import { Component, EventTouch, Label, Node, Prefab, _decorator, instantiate, setDisplayStats } from 'cc';
-import { BulletHell } from './demos/bulletHell/bulletHell';
-import { Player } from './demos/bulletHell/player';
+import { Component, _decorator, director, log } from 'cc';
 
 const { ccclass, property } = _decorator;
 
-@ccclass('main')
-export class main extends Component {
+@ccclass('ManagerScene')
+export class ManagerScene extends Component {
+    public static inst: ManagerScene | null = null;
 
-    @property(Prefab)
-    demoBullet: Prefab = null;
+    public static getInstance(): ManagerScene | null {
+        if (ManagerScene.inst && ManagerScene.inst.isValid) {
+            return ManagerScene.inst;
+        }
 
-    @property(Node)
-    demosNode: Node = null;
+        const scene = director.getScene();
+        if (!scene) {
+            return null;
+        }
 
-    @property(Label)
-    totalTxt: Label = null;
+        const found = scene.getComponentInChildren(ManagerScene);
+        if (found) {
+            ManagerScene.inst = found;
+        }
 
-    currScense: Node = null;
+        return ManagerScene.inst;
+    }
+
+    @property
+    homeSceneName: string = 'home';
+
+    @property
+    collectionSceneName: string = 'collection';
+
+    @property
+    gameSceneName: string = 'game';
+
+    onLoad() {
+        ManagerScene.inst = this;
+        director.addPersistRootNode(this.node);
+    }
+
+    onDestroy() {
+        if (ManagerScene.inst === this) {
+            ManagerScene.inst = null;
+        }
+    }
 
     start() {
-        setDisplayStats(false);
-        this.enterBulletHell();
-
-        // 只保留计数显示
-        this.schedule(() => {
-            const bulletHell = this.currScense?.getComponentInChildren(BulletHell);
-            const length = bulletHell?.objects?.children?.length ?? 0;
-
-            if (this.totalTxt) {
-                this.totalTxt.string = "" + length;
-            }
-        }, 0.1);
+        this.openHome();
     }
 
-    private enterBulletHell(): void {
-        if (this.currScense) {
-            this.currScense.removeFromParent();
-            this.currScense.destroy();
-            this.currScense = null;
-        }
-
-        this.currScense = instantiate(this.demoBullet);
-
-        const left = this.node.getChildByName("Left");
-        if (left) {
-            left.active = false;
-        }
-
-        const skill = this.node.getChildByName("Skill");
-        if (skill) {
-            skill.active = true;
-        }
-
-        this.demosNode?.addChild(this.currScense);
+    public openHome(): void {
+        this.loadScene(this.homeSceneName);
     }
 
-    onSkill(event: EventTouch) {
-        Player.inst?.onSkill();
+    public openCollection(): void {
+        this.loadScene(this.collectionSceneName);
+    }
 
-        if (!event?.target) {
+    public openGame(): void {
+        log('open game scene');
+        this.loadScene(this.gameSceneName);
+    }
+
+    private loadScene(sceneName: string): void {
+        if (!sceneName) {
             return;
         }
 
-        event.target.active = false;
-        this.scheduleOnce(() => {
-            if (event.target?.isValid) {
-                event.target.active = true;
-            }
-        }, 5);
+        director.loadScene(sceneName);
     }
 }
 
