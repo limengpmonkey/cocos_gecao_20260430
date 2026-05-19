@@ -1,11 +1,12 @@
 // SkillSelectionSystem.ts - 技能选择系统
-import { _decorator,tween, Component, Node, Label, Button, instantiate, Prefab,v3, UIOpacity } from 'cc';
+import { _decorator,tween, Component, Node, Label, Button, instantiate, Prefab,v3, UIOpacity, Sprite, SpriteFrame } from 'cc';
 import { ExperienceSystem, ExperienceEvents } from './ExperienceSystem';
 import { GameStateManager } from './GameStateManager';
 import { SkillOption, SkillSelectEventData, LevelUpEventData } from './types';
 import { SkillLibrary } from './skills/SkillLibrary';
 import { SkillOptionButton } from './SkillOptionButton';
 import { BulletHell } from './bulletHell';
+import { Player } from './player';
 
 declare const cc: {
     tween: (target: any) => any;
@@ -14,6 +15,30 @@ declare const cc: {
 };
 
 const { ccclass, property } = _decorator;
+
+@ccclass('SkillCardLevelIcon')
+class SkillCardLevelIcon {
+    @property({ type: Number, tooltip: '技能等级（>=1）' })
+    level: number = 1;
+
+    @property({ type: SpriteFrame, tooltip: '该等级对应的小卡片图标' })
+    icon: SpriteFrame = null;
+}
+
+@ccclass('SkillCardIconBinding')
+class SkillCardIconBinding {
+    @property({ tooltip: '技能 ID（例如：whirlwind_broom）' })
+    skillId: string = '';
+
+    @property({ type: SpriteFrame, tooltip: '该技能默认图标（未命中等级图时使用）' })
+    defaultIcon: SpriteFrame = null;
+
+    @property({
+        type: [SkillCardLevelIcon],
+        tooltip: '按等级配置图标。优先精确等级，其次使用不超过当前等级的最高配置。'
+    })
+    levelIcons: SkillCardLevelIcon[] = [];
+}
 
 // 技能选择事件常量
 export enum SkillSelectionEvents {
@@ -78,6 +103,15 @@ export class SkillSelectionSystem extends Component {
     @property({ type: [SkillOption], tooltip: "可配置的技能池，编辑器中设置" })
     skillPool: SkillOption[] = [];
 
+    @property({
+        type: [SkillCardIconBinding],
+        tooltip: '技能卡图标绑定（支持同技能不同等级显示不同图）'
+    })
+    skillCardIconBindings: SkillCardIconBinding[] = [];
+
+    @property({ type: SpriteFrame, tooltip: '未命中绑定时使用的默认小卡片图标（可选）' })
+    fallbackSkillCardIcon: SpriteFrame = null;
+
     /**
      * 【测试用】强制指定弹窗中出现的技能 ID
      */
@@ -96,6 +130,9 @@ export class SkillSelectionSystem extends Component {
     private _isLevelListenerBound: boolean = false;
     private _pausedGameForSelection: boolean = false;
 
+    // 仅在没有独立弹窗节点时，才回退为切换 selectionPanel.active。
+    private _useSelectionPanelActiveFallback: boolean = false;
+
     // 事件系统
     private _eventTarget: SkillSelectionEventEmitter = new SkillSelectionEventEmitter();
 
@@ -104,6 +141,8 @@ export class SkillSelectionSystem extends Component {
     }
     
     start(): void {
+        // 若配置了独立弹窗节点（推荐），隐藏时不应影响 selectionPanel 下的常驻 HUD。
+        this._useSelectionPanelActiveFallback = !(this.bgNode || this.optionsContainer);
         this.setupEventListeners();
     }
 
@@ -348,6 +387,12 @@ export class SkillSelectionSystem extends Component {
 
         // 立即激活面板
         this.selectionPanel.active = true;
+        if (this.bgNode) {
+            this.bgNode.active = true;
+        }
+        if (this.optionsContainer) {
+            this.optionsContainer.active = true;
+        }
         if (this.selectionPanel.parent) {
             this.selectionPanel.setSiblingIndex(this.selectionPanel.parent.children.length - 1);
         }
@@ -377,7 +422,8 @@ export class SkillSelectionSystem extends Component {
             const optionNode = instantiate(this.skillOptionPrefab);
             container.addChild(optionNode);
             this._animateCardIn(optionNode, index);
-            this.setupOptionNode(optionNode, option, index);
+            const previewLevel = this.getPreviewLevelForOption(option.id);
+            this.setupOptionNode(optionNode, option, index, previewLevel);
             console.log(`✅ 创建技能选项 ${index}: ${option.name}`);
         });
         
@@ -403,7 +449,7 @@ export class SkillSelectionSystem extends Component {
         this._eventTarget.emit(SkillSelectionEvents.ON_SELECTION_HIDE);
 
         // 面板未激活时跳过动画
-        if (!this.selectionPanel.active) {
+        if (!this.selectionPanel.active && !this.bgNode && !this.optionsContainer) {
             this._afterHideCleanup();
             return;
         }
@@ -415,7 +461,15 @@ export class SkillSelectionSystem extends Component {
         const onOneDone = () => {
             pendingCount--;
             if (pendingCount <= 0) {
-                this.selectionPanel.active = false;
+                if (this.bgNode) {
+                    this.bgNode.active = false;
+                }
+                if (this.optionsContainer) {
+                    this.optionsContainer.active = false;
+                }
+                if (this._useSelectionPanelActiveFallback) {
+                    this.selectionPanel.active = false;
+                }
                 this._afterHideCleanup();
             }
         };
@@ -447,7 +501,15 @@ export class SkillSelectionSystem extends Component {
         }
 
         if (pendingCount === 0) {
-            this.selectionPanel.active = false;
+            if (this.bgNode) {
+                this.bgNode.active = false;
+            }
+            if (this.optionsContainer) {
+                this.optionsContainer.active = false;
+            }
+            if (this._useSelectionPanelActiveFallback) {
+                this.selectionPanel.active = false;
+            }
             this._afterHideCleanup();
         }
     }
@@ -554,8 +616,9 @@ export class SkillSelectionSystem extends Component {
     /**
      * 设置技能选项节点
      */
-    private setupOptionNode(node: Node, option: SkillOption, index: number): void {
-        console.log(`设置技能选项节点 ${index}: ${option.name}`);
+    private setupOptionNode(node: Node, option: SkillOption, index: number, previewLevel: number): void {
+        console.log(`设置技能选项节点 ${index}: ${option.name} (预览Lv${previewLevel})`);
+        this.applyOptionIcon(node, option.id, previewLevel);
         
         // 优先使用 SkillOptionButton 组件进行自动绑定
         const optionButton = node.getComponent(SkillOptionButton) || node.getComponentInChildren(SkillOptionButton);
@@ -573,6 +636,89 @@ export class SkillSelectionSystem extends Component {
         } else {
             console.warn(`选项节点 ${index} 缺少 Button 组件`);
         }
+    }
+
+    private normalizeSkillId(id: string): string {
+        return (id || '').trim().toLowerCase();
+    }
+
+    private getPreviewLevelForOption(skillId: string): number {
+        const player = Player.inst;
+        const skillSystem = player?.getComponent('PlayerSkillSystem') as Component & {
+            getSkillLevel?: (id: string) => number;
+        };
+
+        const currentLevel = Math.max(0, skillSystem?.getSkillLevel?.(skillId) ?? 0);
+        return currentLevel + 1;
+    }
+
+    private resolveCardIcon(skillId: string, previewLevel: number): SpriteFrame | null {
+        const normalizedSkillId = this.normalizeSkillId(skillId);
+        const normalizedLevel = Math.max(1, Math.floor(previewLevel));
+
+        const binding = this.skillCardIconBindings.find(
+            b => this.normalizeSkillId(b.skillId) === normalizedSkillId
+        );
+
+        if (!binding) {
+            return this.fallbackSkillCardIcon;
+        }
+
+        let exact: SpriteFrame = null;
+        let bestMatch: SpriteFrame = null;
+        let bestLevel = -1;
+
+        for (const entry of binding.levelIcons || []) {
+            if (!entry?.icon) {
+                continue;
+            }
+
+            const level = Math.max(1, Math.floor(entry.level || 1));
+            if (level === normalizedLevel) {
+                exact = entry.icon;
+                break;
+            }
+            if (level <= normalizedLevel && level > bestLevel) {
+                bestLevel = level;
+                bestMatch = entry.icon;
+            }
+        }
+
+        return exact || bestMatch || binding.defaultIcon || this.fallbackSkillCardIcon;
+    }
+
+    private getOptionIconSprite(optionRoot: Node): Sprite | null {
+        const explicitIconNode = optionRoot.getChildByPath('Button/Sprite');
+        if (explicitIconNode) {
+            const sprite = explicitIconNode.getComponent(Sprite);
+            if (sprite) {
+                return sprite;
+            }
+        }
+
+        const allSprites = optionRoot.getComponentsInChildren(Sprite);
+        for (const sprite of allSprites) {
+            if (sprite.node !== optionRoot) {
+                return sprite;
+            }
+        }
+
+        return optionRoot.getComponent(Sprite) || null;
+    }
+
+    private applyOptionIcon(optionRoot: Node, skillId: string, previewLevel: number): void {
+        const iconSprite = this.getOptionIconSprite(optionRoot);
+        if (!iconSprite) {
+            console.warn('[SkillSelectionSystem] 技能卡片中未找到可设置的 Sprite 组件');
+            return;
+        }
+
+        const spriteFrame = this.resolveCardIcon(skillId, previewLevel);
+        if (!spriteFrame) {
+            return;
+        }
+
+        iconSprite.spriteFrame = spriteFrame;
     }
     
     /**
