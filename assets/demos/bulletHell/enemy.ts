@@ -1,5 +1,5 @@
 // Enemy.ts - 修复版，直接添加状态控制
-import { _decorator, instantiate, PhysicsSystem, Prefab, Quat, Vec3, CCInteger, Node, Sprite, Color, EventTarget } from 'cc';
+import { _decorator, instantiate, PhysicsSystem, Prefab, Quat, Vec3, CCInteger, Node, Sprite, Color, EventTarget, tween } from 'cc';
 import { cBody } from '../../collision/Body';
 import { cObject, Trigger } from '../../collision/Object';
 import { BulletHell } from './bulletHell';
@@ -15,6 +15,7 @@ const { ccclass, property } = _decorator;
 
 const tempPos = new Vec3();
 const tempRot = new Quat();
+const tempDeathTargetPos = new Vec3();
 
 export interface EnemyKilledEventData {
     enemyNode: Node;
@@ -116,6 +117,11 @@ export class Enemy extends cObject {
     private _eliteDashTimer: number = 0;
     private _eliteExplodeRadius: number = 88;
     private _eliteExplodeDamage: number = 12;
+    private _movementDebuffTimer: number = 0;
+    private _movementDebuffMultiplier: number = 1;
+    private _pendingSuctionDeathDuration: number = 0;
+    private _hasPendingSuctionDeath: boolean = false;
+    private _pendingSuctionDeathWorldTarget: Vec3 = new Vec3();
 
     get isBoss(): boolean { return this._isBoss; }
     get isElite(): boolean { return this._isElite; }
@@ -228,6 +234,25 @@ export class Enemy extends cObject {
         this._knockbackTimer = duration;
     }
 
+    applyMovementDebuff(duration: number, speedMultiplier: number): void {
+        if (this.isDead || this._isDying) {
+            return;
+        }
+
+        this._movementDebuffTimer = Math.max(this._movementDebuffTimer, duration);
+        this._movementDebuffMultiplier = Math.min(this._movementDebuffMultiplier, Math.max(0, speedMultiplier));
+        if (this._movementDebuffMultiplier <= 0.0001) {
+            this.tryVelocity.set(Vec3.ZERO);
+            this.velocity.set(Vec3.ZERO);
+        }
+    }
+
+    setSuctionDeathTarget(worldTarget: Vec3, duration: number = 0.28): void {
+        this._pendingSuctionDeathWorldTarget.set(worldTarget);
+        this._pendingSuctionDeathDuration = Math.max(0.05, duration);
+        this._hasPendingSuctionDeath = true;
+    }
+
     beginBossEntranceBuffer(duration: number): void {
         if (!this._isBoss) {
             return;
@@ -256,6 +281,11 @@ export class Enemy extends cObject {
         this._bossEntranceTimer = 0;
         this._bossEntranceFlashTimer = 0;
         this._bossEntranceFlashOn = false;
+        this._movementDebuffTimer = 0;
+        this._movementDebuffMultiplier = 1;
+        this._pendingSuctionDeathDuration = 0;
+        this._hasPendingSuctionDeath = false;
+        this._pendingSuctionDeathWorldTarget.set(Vec3.ZERO);
         this._lastDamageTimeBySource = new WeakMap();
         this._lastDamageTimeNoSource = -9999;
         this.follow();//跟随速度和方向
@@ -457,6 +487,13 @@ export class Enemy extends cObject {
 
         this.updateEliteSkill(dt);
 
+        if (this._movementDebuffTimer > 0) {
+            this._movementDebuffTimer = Math.max(0, this._movementDebuffTimer - dt);
+            if (this._movementDebuffTimer <= 0) {
+                this._movementDebuffMultiplier = 1;
+            }
+        }
+
         if (this._bossEntranceTimer > 0) {
             this._bossEntranceTimer = Math.max(0, this._bossEntranceTimer - dt);
             this._bossEntranceFlashTimer += dt;
@@ -545,6 +582,7 @@ export class Enemy extends cObject {
                 maxVelocity *= distanceToPlayer / slowdownDist;
             }
         }
+        maxVelocity *= this._movementDebuffMultiplier;
         this.tryVelocity.multiplyScalar(maxVelocity);
     
         // 只在朝向变化时翻面，避免每帧触发缩放脏标记导致碰撞体持续重建和抖动。
@@ -624,12 +662,28 @@ export class Enemy extends cObject {
         
         // 1. 停止所有移动和AI
         this.velocity.set(Vec3.ZERO);
+        this.tryVelocity.set(Vec3.ZERO);
         this.playDeathEffect(attackerNode);
+
+        if (this._hasPendingSuctionDeath) {
+            const parent = this.node.parent;
+            if (parent) {
+                Vec3.subtract(tempDeathTargetPos, this._pendingSuctionDeathWorldTarget, parent.worldPosition);
+                const targetScale = this.node.scale.clone().multiplyScalar(0.18);
+                tween(this.node)
+                    .stop()
+                    .to(this._pendingSuctionDeathDuration, { position: tempDeathTargetPos, scale: targetScale }, { easing: 'quadIn' })
+                    .call(() => this.recycle())
+                    .start();
+                this._hasPendingSuctionDeath = false;
+                return;
+            }
+        }
 
         // 3. 延迟回收（不依赖回调）
         this.scheduleOnce(() => {
             this.recycle();
-        }, 0.1); // 1秒后回收
+        }, 0.1);
     }
     
     /** 

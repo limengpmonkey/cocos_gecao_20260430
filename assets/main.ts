@@ -35,7 +35,6 @@ export class ManagerScene extends Component {
 
     onLoad() {
         ManagerScene.inst = this;
-        director.addPersistRootNode(this.node);
     }
 
     onDestroy() {

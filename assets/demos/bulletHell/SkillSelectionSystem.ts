@@ -119,6 +119,18 @@ export class SkillSelectionSystem extends Component {
     debugForcedSkillIds: string[] = [];
 
     /**
+     * 【测试用】单技能测试模式。填写技能 ID 后，弹出的所有卡片都会变成这个技能。
+     */
+    @property({ tooltip: '【测试】单技能测试 ID。填写后，本次弹窗所有卡片都会固定为该技能；留空则关闭。' })
+    debugForceSingleSkillId: string = 'trash_guard';
+
+    /**
+     * 【测试用】关闭当前单技能测试目标的伤害，仅保留表现和行为。
+     */
+    @property({ tooltip: '【测试】关闭当前单技能测试目标的伤害。开启后，仅对 debugForceSingleSkillId 指定的技能生效。' })
+    debugDisableDamageForSingleSkill: boolean = false;
+
+    /**
      * 强制技能轮转起点。
      */
     private debugForcedCursor: number = 0;
@@ -236,6 +248,22 @@ export class SkillSelectionSystem extends Component {
         console.log(`生成 ${count} 个技能选项，当前等级: ${currentLevel}`);
 
         let availableSkills = this.skillPool.length > 0 ? this.skillPool : this.getDefaultSkillPool();
+        const allPool = this.getDefaultSkillPool();
+        const validSkillIds = new Set(SkillLibrary.getAvailableSkillIds());
+
+        const normalizedSingleSkillId = this.debugForceSingleSkillId.trim();
+        if (normalizedSingleSkillId) {
+            if (!validSkillIds.has(normalizedSingleSkillId)) {
+                console.warn(`[SkillSelectionSystem] debugForceSingleSkillId 中的技能 ID 未注册: ${normalizedSingleSkillId}`);
+            } else {
+                const forcedSkill = allPool.find(skill => skill.id === normalizedSingleSkillId);
+                if (forcedSkill) {
+                    const selected = Array.from({ length: count }, () => forcedSkill);
+                    console.log(`[SkillSelectionSystem] 单技能测试模式：所有技能卡固定为 ${forcedSkill.name}`);
+                    return selected;
+                }
+            }
+        }
 
         // 过滤解锁的技能
         availableSkills = availableSkills.filter(skill => {
@@ -244,7 +272,6 @@ export class SkillSelectionSystem extends Component {
         });
 
         // 过滤掉在 SkillLibrary 中不存在的技能
-        const validSkillIds = new Set(SkillLibrary.getAvailableSkillIds());
         availableSkills = availableSkills.filter(skill => {
             if (!validSkillIds.has(skill.id)) {
                 console.warn(`[SkillSelectionSystem] 技能 ID 未注册: ${skill.id}`);
@@ -263,15 +290,15 @@ export class SkillSelectionSystem extends Component {
 
         // 【测试】优先填入 debugForcedSkillIds 指定的技能
         if (this.debugForcedSkillIds.length > 0) {
-            const allPool = this.getDefaultSkillPool();
             const forcedIds = this.debugForcedSkillIds;
             const forcedCount = forcedIds.length;
+            const allowDuplicateForcedSkill = forcedCount === 1;
 
             for (let i = 0; i < forcedCount && selected.length < count; i++) {
                 const forcedIndex = (this.debugForcedCursor + i) % forcedCount;
                 const forcedId = forcedIds[forcedIndex];
                 if (selected.length >= count) break;
-                if (usedIds.has(forcedId)) continue;
+                if (!allowDuplicateForcedSkill && usedIds.has(forcedId)) continue;
                 if (!validSkillIds.has(forcedId)) {
                     console.warn(`[SkillSelectionSystem] debugForcedSkillIds 中的技能 ID 未注册: ${forcedId}`);
                     continue;
@@ -279,8 +306,18 @@ export class SkillSelectionSystem extends Component {
                 const found = allPool.find(s => s.id === forcedId);
                 if (found) {
                     selected.push(found);
-                    usedIds.add(forcedId);
+                    if (!allowDuplicateForcedSkill) {
+                        usedIds.add(forcedId);
+                    }
                 }
+            }
+
+            if (allowDuplicateForcedSkill && selected.length > 0) {
+                while (selected.length < count) {
+                    selected.push(selected[0]);
+                }
+                console.log(`[SkillSelectionSystem] 测试模式：所有技能卡固定为 ${selected[0].name}`);
+                return selected;
             }
 
             if (forcedCount > 0) {
@@ -301,6 +338,28 @@ export class SkillSelectionSystem extends Component {
 
         console.log(`生成的技能选项: ${selected.map(s => s.name).join(', ')}`);
         return selected;
+    }
+
+    public setSingleSkillTestMode(skillId: string | null): void {
+        this.debugForceSingleSkillId = skillId?.trim() ?? '';
+    }
+
+    public clearSingleSkillTestMode(): void {
+        this.debugForceSingleSkillId = '';
+    }
+
+    public isSkillDamageDisabledForSkill(skillId: string | null | undefined): boolean {
+        if (!this.debugDisableDamageForSingleSkill) {
+            return false;
+        }
+
+        const normalizedSkillId = (skillId || '').trim().toLowerCase();
+        const normalizedSingleSkillId = this.debugForceSingleSkillId.trim().toLowerCase();
+        return !!normalizedSkillId && normalizedSkillId === normalizedSingleSkillId;
+    }
+
+    public setSingleSkillDamageDisabled(enabled: boolean): void {
+        this.debugDisableDamageForSingleSkill = !!enabled;
     }
     
     /**

@@ -1567,7 +1567,7 @@
     "__type__": "SkillVisualBinding",
     "skillId": "whirlwind_broom",
     "defaultPrefab": {
-      "__uuid__": "c50f27a5-943c-4fb2-96b3-604e34ba2ef6",
+      "__uuid__": "19f9267b-1b7a-413c-a0dd-74025c1c35e5",
       "__expectedType__": "cc.Prefab"
     },
     "levelPrefabs": []

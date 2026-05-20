@@ -1,5 +1,5 @@
 // ExperienceSystem.ts - 经验与等级系统
-import { _decorator, CCInteger, Component, Label, ProgressBar } from 'cc';
+import { _decorator, CCInteger, Component, Label, ProgressBar, tween, Tween } from 'cc';
 import { ExperienceEventData, LevelUpEventData } from './types';
 import { ExpCurvePoint, computeExpNeedForLevel } from './balanceTable';
 
@@ -41,6 +41,10 @@ export class ExperienceSystem extends Component {
     private expGrowthFactor: number = 1.5;
 
     private _expCurve: ExpCurvePoint[] = [];
+    private readonly expDisplayState = { progress: 0 };
+    private readonly minExpBarTweenDuration = 0.16;
+    private readonly maxExpBarTweenDuration = 0.42;
+    private readonly levelUpExpBarResetDelay = 0.12;
     
     // 事件系统
     // private _eventTarget: EventTarget = new EventTarget();
@@ -59,13 +63,13 @@ export class ExperienceSystem extends Component {
         this._currentExp = 0;
         this._currentLevel = 1;
         this._expToNextLevel = this.computeExpToNextLevel(this._currentLevel);
-        this.refreshUI();
+        this.refreshUI(true);
     }
 
     configureExpCurve(curve: ExpCurvePoint[]): void {
         this._expCurve = Array.isArray(curve) ? [...curve] : [];
         this._expToNextLevel = this.computeExpToNextLevel(this._currentLevel);
-        this.refreshUI();
+        this.refreshUI(true);
     }
 
     private computeExpToNextLevel(level: number): number {
@@ -89,13 +93,20 @@ export class ExperienceSystem extends Component {
         }
 
         this._currentExp += gainedExp;
+        let levelUpCount = 0;
         
         // 检查是否升级
         while (this._currentExp >= this._expToNextLevel) {
             this.levelUp();
+            levelUpCount++;
         }
 
-        this.refreshUI();
+        if (levelUpCount > 0) {
+            this.refreshLevelLabel();
+            this.playLevelUpProgressAnimation(levelUpCount);
+        } else {
+            this.refreshUI(true);
+        }
 
         // 触发经验获取事件（在升级结算后触发，保证 UI 读到的是当前等级进度）
         this.node.emit(ExperienceEvents.ON_EXP_GAIN, {
@@ -109,13 +120,11 @@ export class ExperienceSystem extends Component {
      * 升级
      */
     private levelUp(): void {
-        const cost = this._expToNextLevel;
-        this._currentExp = Math.max(0, this._currentExp - cost);
+        this._currentExp = 0;
         this._currentLevel++;
         
         // 计算升到下一级所需的经验
         this._expToNextLevel = this.computeExpToNextLevel(this._currentLevel);
-        this.refreshUI();
         
         // 触发升级事件
         this.node.emit(ExperienceEvents.ON_LEVEL_UP, {
@@ -137,20 +146,99 @@ export class ExperienceSystem extends Component {
         return Math.max(0, Math.min(1, this._currentExp / this._expToNextLevel));
     }
 
-    private refreshUI(): void {
-        const progress = this.expProgress;
+    private refreshUI(animateProgress: boolean = false): void {
+        this.refreshLevelLabel();
 
+        if (animateProgress) {
+            this.animateProgressTo(this.expProgress);
+            return;
+        }
+
+        this.applyDisplayedProgress(this.expProgress);
+    }
+
+    private refreshLevelLabel(): void {
         if (this.levelLabel) {
             this.levelLabel.string = `等级 ${this._currentLevel}`;
         }
+    }
+
+    private animateProgressTo(targetProgress: number): void {
+        const clampedTarget = this.clampProgress(targetProgress);
+        Tween.stopAllByTarget(this.expDisplayState);
+
+        const startProgress = this.clampProgress(this.expDisplayState.progress);
+        if (Math.abs(clampedTarget - startProgress) <= 0.0001) {
+            this.applyDisplayedProgress(clampedTarget);
+            return;
+        }
+
+        tween(this.expDisplayState)
+            .to(this.getProgressTweenDuration(startProgress, clampedTarget), { progress: clampedTarget }, {
+                easing: 'quadOut',
+                onUpdate: (state: { progress: number }) => {
+                    this.applyDisplayedProgress(state.progress);
+                }
+            })
+            .start();
+    }
+
+    private playLevelUpProgressAnimation(levelUpCount: number): void {
+        if (levelUpCount <= 0) {
+            return;
+        }
+
+        Tween.stopAllByTarget(this.expDisplayState);
+
+        let chain = tween(this.expDisplayState)
+            .to(this.getProgressTweenDuration(this.expDisplayState.progress, 1), { progress: 1 }, {
+                easing: 'quadOut',
+                onUpdate: (state: { progress: number }) => {
+                    this.applyDisplayedProgress(state.progress);
+                }
+            })
+            .delay(this.levelUpExpBarResetDelay)
+            .call(() => {
+                this.applyDisplayedProgress(0);
+            });
+
+        for (let i = 1; i < levelUpCount; i++) {
+            chain = chain
+                .to(this.getProgressTweenDuration(0, 1), { progress: 1 }, {
+                    easing: 'quadOut',
+                    onUpdate: (state: { progress: number }) => {
+                        this.applyDisplayedProgress(state.progress);
+                    }
+                })
+                .delay(this.levelUpExpBarResetDelay)
+                .call(() => {
+                    this.applyDisplayedProgress(0);
+                });
+        }
+
+        chain.start();
+    }
+
+    private applyDisplayedProgress(progress: number): void {
+        const clampedProgress = this.clampProgress(progress);
+        this.expDisplayState.progress = clampedProgress;
 
         if (this.expProgressBar) {
-            this.expProgressBar.progress = progress;
+            this.expProgressBar.progress = clampedProgress;
         }
 
         if (this.expPercentLabel) {
-            this.expPercentLabel.string = `${Math.floor(progress * 100)}%`;
+            this.expPercentLabel.string = `${Math.floor(clampedProgress * 100)}%`;
         }
+    }
+
+    private clampProgress(progress: number): number {
+        return Math.max(0, Math.min(1, progress || 0));
+    }
+
+    private getProgressTweenDuration(from: number, to: number): number {
+        const delta = Math.abs(this.clampProgress(to) - this.clampProgress(from));
+        return this.minExpBarTweenDuration + (this.maxExpBarTweenDuration - this.minExpBarTweenDuration) * delta;
     }
     
     /**

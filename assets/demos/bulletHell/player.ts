@@ -434,6 +434,18 @@ export class Player extends cObject {
             gun.enabled = true;
         }
     }
+
+    public disableDefaultGunFire(): void {
+        for (const gun of this.guns) {
+            gun.isShoot = false;
+            gun.nextCycle = 0;
+        }
+        this.disableAllGuns();
+    }
+
+    public enableDefaultGunFire(): void {
+        this.enableAllGuns();
+    }
     
     // ================== 事件监听 ==================
     

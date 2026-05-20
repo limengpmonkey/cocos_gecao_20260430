@@ -11,7 +11,7 @@
  * 这些实现侧重于可扩展性，能为后续的技能融合、技能树等功能提供基础。
  */
 
-import { Vec3, Node, Quat, tween, PhysicsSystem } from 'cc';
+import { Animation, Vec3, Node, Quat, tween, PhysicsSystem, UITransform } from 'cc';
 import { ActiveSkill } from './ActiveSkill';
 import { BoostSkill } from './BoostSkill';
 import { SummonSkill } from './SummonSkill';
@@ -54,6 +54,14 @@ function spawnProjectile(opts: ProjectileOptions) {
     (bullet as any).damage = opts.damage ?? 10;
 }
 
+function isSkillDamageDisabledForTesting(skillId: string): boolean {
+    const skillSelectionSystem = BulletHell.inst?.node?.getComponentInChildren('SkillSelectionSystem') as {
+        isSkillDamageDisabledForSkill?: (id: string) => boolean;
+    } | null;
+
+    return !!skillSelectionSystem?.isSkillDamageDisabledForSkill?.(skillId);
+}
+
 // -----------------------------
 // 主动技能实现
 // -----------------------------
@@ -69,21 +77,26 @@ export class WhirlwindBroomSkill extends ActiveSkill {
     static CONFIG: SkillConfig = {
         id: 'whirlwind_broom',
         name: '旋风扫把',
-        description: '挥舞扫把对前方扇形区域造成伤害。',
+        description: '挥舞扫把进行挥砍攻击，范围随等级提升。',
         icon: 'skill_whirlwind',
         ...commonActiveSkillConfig,
     } as SkillConfig;
 
-    /** 扇形半径 */
-    private radius = 150;
-    /** 基础伤害 */
     private baseDamage = 30;
-    /** 子弹飞行速度 */
-    private projectileSpeed = 650;
-    /** 扇面初始展开半径 */
-    private initialFanRadius = 40;
-    /** 扇面总张角（弧度）, Math.PI/2 = 90° */
-    private spreadAngle = Math.PI / 2;
+    private slashAngle = Math.PI / 3; // 初始挥砍角度 60°
+    private slashRange = 150; // 初始挥砍范围
+    private slashDuration = 1.0;    
+    private minVisualDuration = 0.45;
+    private orbitRadius = 40;
+    private damageTickInterval = 0.08;
+
+    private activeOwnerNode: Node | null = null;
+    private activeBroomVisual: Skill | null = null;
+    private orbitElapsed = 0;
+    private damageTickElapsed = 0;
+    private orbitStartAngle = -Math.PI * 0.5;
+    private readonly orbitPosition = new Vec3();
+    private readonly currentFacing = new Vec3(1, 0, 0);
 
     constructor(level: number = 1) {
         super(WhirlwindBroomSkill.CONFIG, level);
@@ -92,11 +105,11 @@ export class WhirlwindBroomSkill extends ActiveSkill {
     }
 
     private updateByLevel() {
-        // 升级路径：范围↑ → 攻速↑ → 分裂出小扫把
-        this.radius = 120 + this.level * 10;
-        this.cooldown = Math.max(0.25, 1.0 - (this.level - 1) * 0.07);
-        this.projectileSpeed = 650 + (this.level - 1) * 35;
-        this.initialFanRadius = 34 + this.level * 3;
+        // 提升挥砍范围和角度
+        this.slashRange = 150 + this.level * 20;
+        this.slashAngle = Math.PI / 3 + (this.level - 1) * (Math.PI / 18); // 每级增加 10°
+        this.baseDamage = 30 + this.level * 5;
+        this.orbitRadius = 40;
     }
 
     public levelUp(): void {
@@ -104,60 +117,215 @@ export class WhirlwindBroomSkill extends ActiveSkill {
         this.updateByLevel();
     }
 
+    public update(dt: number): void {
+        super.update(dt);
+
+        if (!this.activeOwnerNode || !this.activeBroomVisual) {
+            return;
+        }
+
+        this.orbitElapsed += dt;
+        this.damageTickElapsed += dt;
+
+        const progress = Math.min(1, this.orbitElapsed / this.slashDuration);
+        const orbitAngle = this.orbitStartAngle + progress * Math.PI * 2;
+
+        this.currentFacing.set(Math.cos(orbitAngle), Math.sin(orbitAngle), 0);
+        this.updateBroomOrbitTransform(this.currentFacing);
+
+        while (this.damageTickElapsed >= this.damageTickInterval) {
+            this.damageTickElapsed -= this.damageTickInterval;
+            this.applyOrbitDamage();
+        }
+
+        if (progress >= 1) {
+            this.clearActiveBroom();
+        }
+    }
+
     protected onUse(context: SkillContext): void {
         const owner = context.ownerNode;
-        const worldPos = owner.worldPosition;
         const parent = BulletHell.inst?.bullets;
         const prefab = context.payload?.visual?.projectilePrefab ?? null;
-        //console.log(`[技能] 旋风扫把 (Lv${this.level}) 触发，位置:`, worldPos, `; 接收 prefab:`, prefab?.name || 'null');
+        const facingDir = this.getSlashDirection(context, owner.worldPosition);
 
-        // 质变 (Lv10)：化为“清洁龙卷风”，持续吸附周围垃圾
-        if (this.isTransformed) {
-            // TODO: 这里可以生成一个持续的吸附 AOEs，并在一定时间内吸附/拉拽敌人
-            //console.log('[技能] 触发：清洁龙卷风（质变）');
-        } else {
-            // 简单模拟：生成三个小扫把子弹来代表扇形
-            if (!parent) {
-                console.warn('[技能] 旋风扫把：未找到 bullets 挂载节点，无法显示投射体');
-                return;
+        if (!parent || !prefab) {
+            console.warn('[技能] 旋风扫把：未找到 bullets 挂载节点或扫把预制体，无法显示攻击效果');
+            return;
+        }
+
+        this.clearActiveBroom();
+
+        const broomVisual = Skill.get(prefab);
+        if (!broomVisual) {
+            console.warn('[技能] 旋风扫把：创建扫把可视体失败');
+            return;
+        }
+
+        broomVisual.insert(parent);
+        broomVisual.init();
+        broomVisual.disableAutoRotation = true;
+        broomVisual.trigger = false;
+            broomVisual.lifeTime = 999999;
+        broomVisual.velocity.set(0, 0, 0);
+        broomVisual.setScale(new Vec3(1, 1, 1));
+
+        const broomNode = broomVisual.node;
+        const animationDuration = this.playBroomAnimation(broomNode);
+        const cleanupDelay = Math.max(this.slashDuration, this.minVisualDuration, animationDuration);
+
+        broomVisual.lifeTime = cleanupDelay + 0.1;
+
+        this.activeOwnerNode = owner;
+        this.activeBroomVisual = broomVisual;
+        this.orbitElapsed = 0;
+        this.damageTickElapsed = 0;
+        this.orbitStartAngle = Math.atan2(facingDir.y, facingDir.x);
+        this.currentFacing.set(facingDir.x, facingDir.y, 0);
+        this.updateBroomOrbitTransform(this.currentFacing);
+        this.applyOrbitDamage();
+    }
+
+    private getEnemiesInSlashRange(center: Vec3, facingDir: Vec3, range: number, angle: number): Enemy[] {
+        const enemies: Enemy[] = [];
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) return enemies;
+
+        const normalizedFacing = new Vec3(facingDir.x, facingDir.y, 0);
+        if (normalizedFacing.lengthSqr() <= 0.0001) {
+            normalizedFacing.set(1, 0, 0);
+        }
+        normalizedFacing.normalize();
+
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead) continue;
+
+            const enemyPos = enemyNode.worldPosition;
+            const dirToEnemy = new Vec3(enemyPos.x - center.x, enemyPos.y - center.y, 0);
+            const distance = dirToEnemy.length();
+
+            if (distance > range) continue;
+
+            if (distance <= 0.001) {
+                enemies.push(enemy);
+                continue;
             }
-            const angleCount = 7;
-            // 每次发动随机挑一个朝向，再展开固定张角的扇面
-            const dirs = fanDirections(angleCount, randomAngle(), this.spreadAngle);
-            for (let i = 0; i < angleCount; i++) {
-                const dir = dirs[i];
 
-                // 这里使用 Skill 作为投射体（需要在 SkillManager 中配置 skillPrefab）
-                const skill = prefab ? Skill.get(prefab) : null;
-                if (!skill) {
-                    console.warn('[技能] 旋风扫把：未配置 Skill Prefab，无法生成投射体');
-                    return;
-                }
-
-                skill.insert(parent);
-                skill.init();
-
-                const spawnWorldPos = offsetAlongDirection(worldPos, dir, this.initialFanRadius);
-                const localPos = new Vec3();
-                Vec3.subtract(localPos, spawnWorldPos, parent.worldPosition);
-                skill.setPosition(localPos);
-                skill.velocity.set(dir).multiplyScalar(this.projectileSpeed);
-                // 攻击距离 = 速度 * 存活时间；将存活时间减半可保证全等级射程统一减半。
-                skill.lifeTime = 0.2;
-
-                // 伤害/穿透/击退
-                (skill as any).damage = this.baseDamage;
-                (skill as any).penetration = 3 + Math.floor(this.level / 3);
-                (skill as any).knockback = 250;
-                (skill as any).hitCount = 0;
-
-                // 可根据是否激活分裂增加更多子技能
-                if (this.level >= 7) {
-                    // 额外的小扫把
-                    // （仅演示，不会真实分裂）
-                }
+            dirToEnemy.normalize();
+            const dot = Math.max(-1, Math.min(1, Vec3.dot(normalizedFacing, dirToEnemy)));
+            const deltaAngle = Math.acos(dot);
+            if (deltaAngle <= angle * 0.5) {
+                enemies.push(enemy);
             }
         }
+
+        return enemies;
+    }
+
+    private getSlashDirection(context: SkillContext, origin: Vec3): Vec3 {
+        const target = context.targetPosition;
+        if (target) {
+            const dir = new Vec3(target.x - origin.x, target.y - origin.y, 0);
+            if (dir.lengthSqr() > 0.0001) {
+                dir.normalize();
+                return dir;
+            }
+        }
+
+        return new Vec3(0, -1, 0);
+    }
+
+    private playSlashVisual(broomNode: Node, facingDir: Vec3): void {
+        // 当前资源里扫把尾部方向与之前判断相反，需要额外翻转 180° 才会朝向玩家中心。
+        const towardOwnerAngle = Math.atan2(-facingDir.y, -facingDir.x);
+        const spriteTailAngleDeg = 45;
+        const rotationDeg = towardOwnerAngle * 180 / Math.PI - spriteTailAngleDeg;
+
+        broomNode.setRotationFromEuler(0, 0, rotationDeg);
+        broomNode.setScale(new Vec3(1, 1, 1));
+    }
+
+    private updateBroomOrbitTransform(facingDir: Vec3): void {
+        if (!this.activeOwnerNode || !this.activeBroomVisual) {
+            return;
+        }
+
+        const ownerPos = this.activeOwnerNode.worldPosition;
+        this.orbitPosition.set(
+            ownerPos.x + facingDir.x * this.orbitRadius,
+            ownerPos.y + facingDir.y * this.orbitRadius,
+            ownerPos.z
+        );
+
+        const broomNode = this.activeBroomVisual.node;
+        broomNode.setWorldPosition(this.orbitPosition);
+        this.playSlashVisual(broomNode, facingDir);
+    }
+
+    private applyOrbitDamage(): void {
+        if (!this.activeOwnerNode) {
+            return;
+        }
+
+        if (isSkillDamageDisabledForTesting(WhirlwindBroomSkill.CONFIG.id)) {
+            return;
+        }
+
+        const enemies = this.getEnemiesInSlashRange(
+            this.activeOwnerNode.worldPosition,
+            this.currentFacing,
+            this.slashRange,
+            this.slashAngle
+        );
+
+        for (const enemy of enemies) {
+            enemy.takeDamage(this.baseDamage, this.activeOwnerNode);
+        }
+    }
+
+    private clearActiveBroom(): void {
+        if (this.activeBroomVisual) {
+                tween(this.activeBroomVisual.node).stop();
+            Skill.put(this.activeBroomVisual);
+            this.activeBroomVisual = null;
+        }
+
+        this.activeOwnerNode = null;
+        this.orbitElapsed = 0;
+        this.damageTickElapsed = 0;
+        this.currentFacing.set(1, 0, 0);
+    }
+
+    private playBroomAnimation(broomNode: Node): number {
+        const animations = broomNode.getComponentsInChildren(Animation);
+        if (!animations || animations.length === 0) {
+            return 0;
+        }
+
+        let maxDuration = 0;
+        for (const animation of animations) {
+            const animationAny = animation as any;
+            const clips = (animationAny.clips as Array<{ name?: string; duration?: number }> | undefined) ?? [];
+            const slashClip = clips.find(clip => clip?.name === 'slash');
+            const chosenClip = slashClip ?? animationAny.defaultClip ?? clips[0] ?? null;
+            if (!chosenClip) {
+                continue;
+            }
+
+            animation.stop();
+            if (chosenClip.name) {
+                animation.play(chosenClip.name);
+            } else {
+                animation.play();
+            }
+
+            if (typeof chosenClip.duration === 'number' && chosenClip.duration > maxDuration) {
+                maxDuration = chosenClip.duration;
+            }
+        }
+
+        return maxDuration;
     }
 }
 
@@ -279,7 +447,7 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         skill.lifeTime = this.expandDuration + this.shrinkDuration + 0.1;
 
         // 伤害/穿透/击退
-        (skill as any).damage = this.baseDamage;
+        (skill as any).damage = isSkillDamageDisabledForTesting(HighPressureWaterGunSkill.CONFIG.id) ? 0 : this.baseDamage;
         (skill as any).penetration = 9999; // 无限穿透，可以穿过所有敌人
         (skill as any).knockback = 180;
         (skill as any).hitCount = 0;
@@ -397,6 +565,10 @@ export class TrashBagFieldSkill extends ActiveSkill {
 
     private applyAreaDamage(): void {
         if (!this.fieldOwnerNode) {
+            return;
+        }
+
+        if (isSkillDamageDisabledForTesting(TrashBagFieldSkill.CONFIG.id)) {
             return;
         }
 
@@ -676,6 +848,8 @@ export class CleaningRobotSkill extends SummonSkill {
 }
 
 export class TrashGuardSkill extends SummonSkill {
+    private static readonly vortexVisualBaselineByPrefab = new WeakMap<import('cc').Prefab, { scale: Vec3; radius: number }>();
+
     static CONFIG: SkillConfig = {
         id: 'trash_guard',
         name: '垃圾桶卫兵',
@@ -688,32 +862,60 @@ export class TrashGuardSkill extends SummonSkill {
     private attackInterval = 3.1;
     private summonDuration = 24;
 
-    private followRadius = 110;
-    private followLerpSpeed = 5;
-    private orbitSpeed = 1.4;
+    private standbyRadius = 72;
+    private minPlayerClearRadius = 56;
+    private maxLeashRadius = 148;
+    private followMoveSpeed = 150;
+    private dashMoveSpeed = 780;
+    private castMoveMinRadius = 48;
+    private castMoveMaxRadius = 110;
 
     private castLockDuration = 0.55;
     private vanishDuration = 0.3;
     private vanishEveryCasts = 3;
+    private castControlRadiusFactor = 1.0;
+    private castSlowDuration = 0.12;
+    private castKillSuctionDuration = 0.26;
+    private readonly baseCastDamage = 24;
+    private readonly castDamageGrowthPerLevel = 10;
+    private readonly castDamageTuningMultiplier = 1;
+    private castDamage = 24;
 
     private ownerNode: Node | null = null;
     private summonParent: Node | null = null;
     private guardVisual: Skill | null = null;
+    private guardVisualPrefab: import('cc').Prefab | null = null;
+    private guardAnimations: Animation[] = [];
+    private guardVortexNode: Node | null = null;
+    private readonly guardMoveAnimationClipName = 'weibing_walking';
+    private readonly guardAttackAnimationClipName = 'xishou';
 
     private isSummoned = false;
     private summonElapsed = 0;
     private attackElapsed = 0;
     private castLockElapsed = 0;
     private vanishElapsed = 0;
-    private orbitAngle = 0;
     private isCasting = false;
     private isVanishing = false;
+    private isRepositioningForCast = false;
     private castsSinceVanish = 0;
 
     private readonly guardPosition = new Vec3();
+    private readonly standbyOffset = new Vec3();
     private readonly desiredWorldPosition = new Vec3();
+    private readonly castTargetWorldPosition = new Vec3();
     private readonly tempLocalPosition = new Vec3();
     private readonly castCenterWorldPosition = new Vec3();
+    private readonly tempMoveDelta = new Vec3();
+    private readonly tempOwnerOffset = new Vec3();
+    private readonly guardBaseScale = new Vec3(1, 1, 1);
+    private readonly vortexBaseScale = new Vec3(1, 1, 1);
+    private readonly vortexHiddenScale = new Vec3(0.2, 0.2, 1);
+    private readonly vortexChargeScale = new Vec3(1, 1, 1);
+    private readonly vortexCastScale = new Vec3(1, 1, 1);
+    private readonly tempVortexScale = new Vec3(1, 1, 1);
+    private hasCachedVortexBaseScale = false;
+    private vortexVisualBaseRadius = 16;
 
     constructor(level: number = 1) {
         super(TrashGuardSkill.CONFIG, level);
@@ -721,12 +923,21 @@ export class TrashGuardSkill extends SummonSkill {
     }
 
     private updateByLevel() {
-        this.attackRadius = 240 + this.level * 24;
-        this.attackInterval = Math.max(1.6, 3.2 - 0.14 * (this.level - 1));
+        this.attackRadius = 132;
+        this.attackInterval = Math.max(1.1, 3.15 - 0.22 * (this.level - 1));
+        this.castDamage = Math.round(
+            (this.baseCastDamage + this.castDamageGrowthPerLevel * (this.level - 1)) * this.castDamageTuningMultiplier
+        );
         this.summonDuration = 22 + this.level * 2.0;
-        this.followRadius = 90 + this.level * 5;
-        this.followLerpSpeed = Math.min(8, 4.8 + this.level * 0.2);
+        this.standbyRadius = 56 + this.level * 4;
+        this.minPlayerClearRadius = Math.min(this.standbyRadius - 10, 50 + this.level * 2);
+        this.maxLeashRadius = 132 + this.level * 6;
+        this.followMoveSpeed = 132 + this.level * 10;
+        this.dashMoveSpeed = 700 + this.level * 24;
+        this.castMoveMinRadius = Math.max(this.minPlayerClearRadius + 8, Math.min(82, 40 + this.level * 2));
+        this.castMoveMaxRadius = Math.min(this.maxLeashRadius - 12, 92 + this.level * 5);
         this.castLockDuration = Math.max(0.35, 0.58 - this.level * 0.01);
+        this.castSlowDuration = this.castLockDuration + 0.08;
         // 提升等级后更少消失，更像稳定随从。
         this.vanishEveryCasts = Math.max(2, 4 - Math.floor(this.level / 4));
     }
@@ -765,11 +976,21 @@ export class TrashGuardSkill extends SummonSkill {
                 this.vanishElapsed = 0;
                 this.guardVisual.node.active = true;
                 this.syncGuardToWorld(this.guardPosition);
+                this.playGuardMoveAnimation();
+            }
+            return;
+        }
+
+        if (this.isRepositioningForCast) {
+            if (this.moveGuardTowards(this.castTargetWorldPosition, this.dashMoveSpeed, dt)) {
+                this.isRepositioningForCast = false;
+                this.startCast();
             }
             return;
         }
 
         if (this.isCasting) {
+            this.applyCastControl();
             this.castLockElapsed += dt;
             if (this.castLockElapsed >= this.castLockDuration) {
                 this.executeSuctionAndExecution();
@@ -792,7 +1013,7 @@ export class TrashGuardSkill extends SummonSkill {
         this.attackElapsed += dt;
         if (this.attackElapsed >= this.attackInterval) {
             this.attackElapsed = 0;
-            this.startCast();
+            this.beginCastReposition();
             return;
         }
 
@@ -812,6 +1033,7 @@ export class TrashGuardSkill extends SummonSkill {
             console.warn('[召唤] 垃圾桶卫兵：未配置可视 prefab，无法召唤');
             return;
         }
+        this.guardVisualPrefab = prefab;
 
         // 已有实体时仅刷新持续时间和参数，不重复创建。
         if (!this.guardVisual) {
@@ -826,6 +1048,8 @@ export class TrashGuardSkill extends SummonSkill {
             this.guardVisual.disableAutoRotation = true;
         }
 
+        this.cacheGuardVisualNodes();
+
         this.configureGuardVisualCollision();
 
         this.guardVisual.lifeTime = 999999;
@@ -838,11 +1062,15 @@ export class TrashGuardSkill extends SummonSkill {
         this.vanishElapsed = 0;
         this.isCasting = false;
         this.isVanishing = false;
+        this.isRepositioningForCast = false;
         this.castsSinceVanish = 0;
 
-        this.orbitAngle = Math.random() * Math.PI * 2;
+        this.pickStandbyOffset();
         this.guardPosition.set(this.ownerNode.worldPosition);
+        this.guardPosition.add(this.standbyOffset);
         this.syncGuardToWorld(this.guardPosition);
+        this.resetGuardVisualState();
+        this.playGuardMoveAnimation();
 
         //console.log(`[召唤] 垃圾桶卫兵 已召唤，持续 ${this.summonDuration.toFixed(1)}s，攻击半径 ${this.attackRadius}`);
     }
@@ -856,17 +1084,38 @@ export class TrashGuardSkill extends SummonSkill {
             return;
         }
 
-        this.orbitAngle += dt * this.orbitSpeed;
         const ownerPos = this.ownerNode.worldPosition;
         this.desiredWorldPosition.set(
-            ownerPos.x + Math.cos(this.orbitAngle) * this.followRadius,
-            ownerPos.y + Math.sin(this.orbitAngle) * this.followRadius,
+            ownerPos.x + this.standbyOffset.x,
+            ownerPos.y + this.standbyOffset.y,
             0
         );
+        this.clampWithinLeash(ownerPos, this.desiredWorldPosition);
 
-        const t = Math.min(1, dt * this.followLerpSpeed);
-        Vec3.lerp(this.guardPosition, this.guardPosition, this.desiredWorldPosition, t);
-        this.syncGuardToWorld(this.guardPosition);
+        let moveSpeed = this.followMoveSpeed;
+        Vec3.subtract(this.tempMoveDelta, this.guardPosition, ownerPos);
+        if (this.tempMoveDelta.lengthSqr() > this.maxLeashRadius * this.maxLeashRadius) {
+            moveSpeed *= 2;
+        }
+
+        this.moveGuardTowards(this.desiredWorldPosition, moveSpeed, dt);
+    }
+
+    private beginCastReposition(): void {
+        if (!this.ownerNode) {
+            return;
+        }
+
+        const ownerPos = this.ownerNode.worldPosition;
+        const angle = this.getCurrentRelativeAngle(ownerPos) + (Math.random() - 0.5) * Math.PI * 0.9;
+        const radius = this.castMoveMinRadius + Math.random() * Math.max(0, this.castMoveMaxRadius - this.castMoveMinRadius);
+        this.castTargetWorldPosition.set(
+            ownerPos.x + Math.cos(angle) * radius,
+            ownerPos.y + Math.sin(angle) * radius,
+            0
+        );
+        this.clampWithinLeash(ownerPos, this.castTargetWorldPosition);
+        this.isRepositioningForCast = true;
     }
 
     private startCast(): void {
@@ -877,12 +1126,14 @@ export class TrashGuardSkill extends SummonSkill {
         this.isCasting = true;
         this.castLockElapsed = 0;
         this.castCenterWorldPosition.set(this.guardPosition);
+        this.playGuardAttackAnimation();
+        this.showVortexChargeEffect();
 
         // 攻击前摇：短促放大，制造“剧烈释放”感。
         tween(this.guardVisual.node)
             .stop()
-            .to(0.12, { scale: new Vec3(1.45, 1.45, 1) })
-            .to(0.08, { scale: new Vec3(1, 1, 1) })
+            .to(0.18, { scale: new Vec3(1.45, 1.45, 1) })
+            .to(0.16, { scale: new Vec3(1, 1, 1) })
             .start();
     }
 
@@ -891,13 +1142,21 @@ export class TrashGuardSkill extends SummonSkill {
             return;
         }
 
-        const enemyRoot = BulletHell.inst?.objects;
-        if (!enemyRoot) {
+        if (isSkillDamageDisabledForTesting(TrashGuardSkill.CONFIG.id)) {
+            this.playVortexCastEffect(() => this.playGuardMoveAnimation());
             return;
         }
 
-        const radiusSqr = this.attackRadius * this.attackRadius;
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            this.playVortexCastEffect(() => this.playGuardMoveAnimation());
+            return;
+        }
+
+        const radius = this.attackRadius * this.castControlRadiusFactor;
+        const radiusSqr = radius * radius;
         let killCount = 0;
+        let hitCount = 0;
 
         for (const enemyNode of enemyRoot.children) {
             const enemy = enemyNode.getComponent(Enemy);
@@ -912,18 +1171,47 @@ export class TrashGuardSkill extends SummonSkill {
                 continue;
             }
 
-            const parent = enemyNode.parent;
-            if (parent) {
-                Vec3.subtract(this.tempLocalPosition, this.castCenterWorldPosition, parent.worldPosition);
-                enemy.setPosition(this.tempLocalPosition);
+            const willBeKilled = enemy.currentHp <= this.castDamage;
+            if (willBeKilled) {
+                enemy.setSuctionDeathTarget(this.castCenterWorldPosition, this.castKillSuctionDuration);
             }
 
-            enemy.takeDamage(999999, this.ownerNode);
-            killCount++;
+            enemy.takeDamage(this.castDamage, this.ownerNode);
+            hitCount++;
+            if (willBeKilled) {
+                killCount++;
+            }
         }
 
-        if (killCount > 0) {
-            console.log(`[召唤] 垃圾桶卫兵释放收束处决，击杀 ${killCount} 个目标`);
+        if (hitCount > 0) {
+            console.log(`[召唤] 垃圾桶卫兵释放收束打击，命中 ${hitCount} 个目标，击杀 ${killCount} 个目标，单次伤害 ${this.castDamage}`);
+        }
+
+        this.playVortexCastEffect(() => this.playGuardMoveAnimation());
+    }
+
+    private applyCastControl(): void {
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            return;
+        }
+
+        const radius = this.attackRadius * this.castControlRadiusFactor;
+        const radiusSqr = radius * radius;
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead) {
+                continue;
+            }
+
+            const enemyPos = enemyNode.worldPosition;
+            const dx = enemyPos.x - this.castCenterWorldPosition.x;
+            const dy = enemyPos.y - this.castCenterWorldPosition.y;
+            if (dx * dx + dy * dy > radiusSqr) {
+                continue;
+            }
+
+            enemy.applyMovementDebuff(this.castSlowDuration, enemy.isBoss ? 0.28 : 0);
         }
     }
 
@@ -937,7 +1225,16 @@ export class TrashGuardSkill extends SummonSkill {
     }
 
     private clearGuard(): void {
+        if (this.guardVortexNode) {
+            tween(this.guardVortexNode).stop();
+            if (this.hasCachedVortexBaseScale) {
+                this.guardVortexNode.setScale(this.vortexBaseScale);
+            }
+            this.guardVortexNode.active = false;
+        }
+
         if (this.guardVisual) {
+            tween(this.guardVisual.node).stop();
             Skill.put(this.guardVisual);
             this.guardVisual = null;
         }
@@ -949,7 +1246,270 @@ export class TrashGuardSkill extends SummonSkill {
         this.vanishElapsed = 0;
         this.isCasting = false;
         this.isVanishing = false;
+        this.isRepositioningForCast = false;
         this.castsSinceVanish = 0;
+        this.guardAnimations = [];
+        this.guardVisualPrefab = null;
+        this.guardVortexNode = null;
+    }
+
+    private pickStandbyOffset(): void {
+        const angle = this.getCurrentRelativeAngle(this.ownerNode?.worldPosition ?? Vec3.ZERO) + (Math.random() - 0.5) * Math.PI * 0.45;
+        const radius = this.standbyRadius * (0.72 + Math.random() * 0.22);
+        this.standbyOffset.set(Math.cos(angle) * radius, Math.sin(angle) * radius, 0);
+    }
+
+    private clampWithinLeash(ownerWorldPos: Vec3, targetWorldPos: Vec3): void {
+        Vec3.subtract(this.tempMoveDelta, targetWorldPos, ownerWorldPos);
+        const distance = this.tempMoveDelta.length();
+        if (distance > this.maxLeashRadius) {
+            this.tempMoveDelta.multiplyScalar(this.maxLeashRadius / distance);
+            targetWorldPos.set(
+                ownerWorldPos.x + this.tempMoveDelta.x,
+                ownerWorldPos.y + this.tempMoveDelta.y,
+                0
+            );
+        } else if (distance > 0.0001 && distance < this.minPlayerClearRadius) {
+            this.tempMoveDelta.multiplyScalar(this.minPlayerClearRadius / distance);
+            targetWorldPos.set(
+                ownerWorldPos.x + this.tempMoveDelta.x,
+                ownerWorldPos.y + this.tempMoveDelta.y,
+                0
+            );
+        } else if (distance <= 0.0001) {
+            targetWorldPos.set(ownerWorldPos.x + this.minPlayerClearRadius, ownerWorldPos.y, 0);
+        }
+    }
+
+    private moveGuardTowards(targetWorldPos: Vec3, speed: number, dt: number): boolean {
+        const ownerPos = this.ownerNode?.worldPosition;
+        if (ownerPos) {
+            this.clampWithinLeash(ownerPos, targetWorldPos);
+        }
+
+        Vec3.subtract(this.tempMoveDelta, targetWorldPos, this.guardPosition);
+        const distance = this.tempMoveDelta.length();
+        if (distance <= 0.001) {
+            this.guardPosition.set(targetWorldPos);
+            if (ownerPos) {
+                this.clampWithinLeash(ownerPos, this.guardPosition);
+            }
+            this.syncGuardToWorld(this.guardPosition);
+            return true;
+        }
+
+        const maxStep = Math.max(0, speed) * dt;
+        if (distance <= maxStep) {
+            this.guardPosition.set(targetWorldPos);
+            if (ownerPos) {
+                this.clampWithinLeash(ownerPos, this.guardPosition);
+            }
+            this.syncGuardToWorld(this.guardPosition);
+            return true;
+        }
+
+        this.tempMoveDelta.multiplyScalar(maxStep / distance);
+        this.guardPosition.add(this.tempMoveDelta);
+        if (ownerPos) {
+            this.clampWithinLeash(ownerPos, this.guardPosition);
+        }
+        this.syncGuardToWorld(this.guardPosition);
+        return false;
+    }
+
+    private getCurrentRelativeAngle(ownerWorldPos: Vec3): number {
+        Vec3.subtract(this.tempOwnerOffset, this.guardPosition, ownerWorldPos);
+        if (this.tempOwnerOffset.lengthSqr() <= 0.0001) {
+            return randomAngle();
+        }
+
+        return Math.atan2(this.tempOwnerOffset.y, this.tempOwnerOffset.x);
+    }
+
+    private cacheGuardVisualNodes(): void {
+        if (!this.guardVisual) {
+            this.guardAnimations = [];
+            this.guardVortexNode = null;
+            return;
+        }
+
+        this.guardAnimations = this.guardVisual.node.getComponentsInChildren(Animation);
+        this.guardBaseScale.set(this.guardVisual.node.scale);
+        this.guardVortexNode = this.findGuardVortexNode(this.guardVisual.node);
+        if (this.guardVortexNode) {
+            const cachedBaseline = this.guardVisualPrefab
+                ? TrashGuardSkill.vortexVisualBaselineByPrefab.get(this.guardVisualPrefab)
+                : null;
+
+            if (cachedBaseline) {
+                this.vortexBaseScale.set(cachedBaseline.scale);
+                this.vortexVisualBaseRadius = cachedBaseline.radius;
+                this.hasCachedVortexBaseScale = true;
+            } else if (!this.hasCachedVortexBaseScale) {
+                const currentScale = this.guardVortexNode.scale;
+                const looksLikeHiddenScale = currentScale.x <= this.vortexHiddenScale.x + 0.001 && currentScale.y <= this.vortexHiddenScale.y + 0.001;
+                if (looksLikeHiddenScale) {
+                    this.vortexBaseScale.set(1, 1, 1);
+                } else {
+                    this.vortexBaseScale.set(currentScale);
+                }
+
+                this.guardVortexNode.setScale(this.vortexBaseScale);
+                const vortexTransform = this.guardVortexNode.getComponent(UITransform);
+                const maxSize = Math.max(vortexTransform?.contentSize.width ?? 0, vortexTransform?.contentSize.height ?? 0);
+                const baseScaleRadius = Math.max(
+                    this.vortexBaseScale.x * maxSize * 0.5,
+                    this.vortexBaseScale.y * maxSize * 0.5,
+                    1
+                );
+                this.vortexVisualBaseRadius = baseScaleRadius;
+                this.hasCachedVortexBaseScale = true;
+
+                if (this.guardVisualPrefab) {
+                    TrashGuardSkill.vortexVisualBaselineByPrefab.set(this.guardVisualPrefab, {
+                        scale: this.vortexBaseScale.clone(),
+                        radius: this.vortexVisualBaseRadius,
+                    });
+                }
+            }
+
+            this.guardVortexNode.setScale(this.vortexBaseScale);
+        }
+    }
+
+    private findGuardVortexNode(root: Node): Node | null {
+        const exactNode = root.getChildByName('xuanwo');
+        if (exactNode) {
+            return exactNode;
+        }
+
+        return root.children.find(child => child.name.toLowerCase().includes('xuanwo')) ?? null;
+    }
+
+    private resetGuardVisualState(): void {
+        if (!this.guardVisual) {
+            return;
+        }
+
+        tween(this.guardVisual.node).stop();
+        this.guardVisual.node.setScale(this.guardBaseScale);
+        this.hideGuardVortex();
+    }
+
+    private hideGuardVortex(): void {
+        if (!this.guardVortexNode) {
+            return;
+        }
+
+        tween(this.guardVortexNode).stop();
+        this.guardVortexNode.active = false;
+        this.guardVortexNode.setScale(this.vortexHiddenScale);
+    }
+
+    private getVortexScaleForRadius(multiplier: number = 1): Vec3 {
+        const scaleFactor = Math.max(0.1, (this.attackRadius / Math.max(1, this.vortexVisualBaseRadius)) * multiplier);
+        this.tempVortexScale.set(
+            this.vortexBaseScale.x * scaleFactor,
+            this.vortexBaseScale.y * scaleFactor,
+            this.vortexBaseScale.z
+        );
+        return this.tempVortexScale.clone();
+    }
+
+    private playGuardMoveAnimation(): void {
+        this.playGuardAnimation(this.guardMoveAnimationClipName);
+        this.hideGuardVortex();
+    }
+
+    private playGuardAttackAnimation(): void {
+        this.playGuardAnimation(this.guardAttackAnimationClipName);
+    }
+
+    private playGuardAnimation(configuredClipName: string): void {
+        if (!this.guardAnimations.length) {
+            return;
+        }
+
+        for (const animation of this.guardAnimations) {
+            const animationAny = animation as any;
+            const clips = (animationAny.clips as Array<{ name?: string }> | undefined) ?? [];
+            const chosenClip = this.resolveGuardAnimationClip(animationAny, clips, configuredClipName);
+
+            if (!chosenClip) {
+                continue;
+            }
+
+            animation.stop();
+            if (chosenClip.name) {
+                animation.play(chosenClip.name);
+            } else {
+                animation.play();
+            }
+        }
+    }
+
+    private resolveGuardAnimationClip(
+        animationAny: { defaultClip?: { name?: string } | null },
+        clips: Array<{ name?: string }>,
+        configuredClipName: string
+    ): { name?: string } | null {
+        const normalizedConfiguredName = configuredClipName.trim().toLowerCase();
+        if (normalizedConfiguredName) {
+            const exactClip = clips.find(clip => (clip?.name?.trim().toLowerCase() ?? '') === normalizedConfiguredName);
+            if (exactClip) {
+                return exactClip;
+            }
+
+            console.warn(`[TrashGuardSkill] 未找到动画剪辑: ${configuredClipName}，将回退到默认动画`);
+        }
+
+        return animationAny.defaultClip ?? clips[0] ?? null;
+    }
+
+    private playVortexCastEffect(onComplete?: () => void): void {
+        if (!this.guardVortexNode) {
+            onComplete?.();
+            return;
+        }
+
+        const fullRangeScale = this.getVortexScaleForRadius(1.0);
+        const overdriveScale = this.getVortexScaleForRadius(1.08);
+
+        tween(this.guardVortexNode).stop();
+        this.guardVortexNode.active = true;
+        this.guardVortexNode.setScale(this.vortexChargeScale);
+
+        tween(this.guardVortexNode)
+            .to(0.18, { scale: fullRangeScale })
+            .to(0.18, { scale: overdriveScale })
+            .to(0.22, { scale: this.vortexHiddenScale })
+            .call(() => {
+                if (!this.guardVortexNode) {
+                    onComplete?.();
+                    return;
+                }
+                this.guardVortexNode.active = false;
+                onComplete?.();
+            })
+            .start();
+    }
+
+    private showVortexChargeEffect(): void {
+        if (!this.guardVortexNode) {
+            return;
+        }
+
+        const chargeScale = this.getVortexScaleForRadius(0.72);
+        this.vortexChargeScale.set(chargeScale);
+        this.vortexCastScale.set(this.getVortexScaleForRadius(1.0));
+
+        tween(this.guardVortexNode).stop();
+        this.guardVortexNode.active = true;
+        this.guardVortexNode.setScale(this.vortexHiddenScale);
+
+        tween(this.guardVortexNode)
+            .to(0.16, { scale: chargeScale })
+            .start();
     }
 
     /**
