@@ -185,10 +185,7 @@
       "b": 255,
       "a": 255
     },
-    "_spriteFrame": {
-      "__uuid__": "83d612e3-6bfe-49f5-9722-2158ce97c4e3@f9941",
-      "__expectedType__": "cc.SpriteFrame"
-    },
+    "_spriteFrame": null,
     "_type": 0,
     "_fillType": 0,
     "_sizeMode": 0,
@@ -232,10 +229,14 @@
       {
         "__uuid__": "c82eb18d-8514-4081-870f-0f3c88f39be5",
         "__expectedType__": "cc.AnimationClip"
+      },
+      {
+        "__uuid__": "7505ab4a-9488-46ef-bbd5-17e0bdd812a4",
+        "__expectedType__": "cc.AnimationClip"
       }
     ],
     "_defaultClip": {
-      "__uuid__": "c82eb18d-8514-4081-870f-0f3c88f39be5",
+      "__uuid__": "7505ab4a-9488-46ef-bbd5-17e0bdd812a4",
       "__expectedType__": "cc.AnimationClip"
     },
     "_id": ""

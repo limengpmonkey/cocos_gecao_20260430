@@ -11,12 +11,13 @@
  * 这些实现侧重于可扩展性，能为后续的技能融合、技能树等功能提供基础。
  */
 
-import { Animation, Vec3, Node, Quat, tween, PhysicsSystem, UITransform } from 'cc';
+import { Animation, Color, Vec3, Node, Quat, Sprite, tween, PhysicsSystem, UITransform, view } from 'cc';
 import { ActiveSkill } from './ActiveSkill';
 import { BoostSkill } from './BoostSkill';
 import { SummonSkill } from './SummonSkill';
 import { SkillContext, SkillConfig, SkillSlotType } from './SkillTypes';
 import { randomAngle, fanDirections, offsetAlongDirection } from './SkillUtils';
+import { createWaterGunProfile, WATER_GUN_AMMO_LABELS, WATER_GUN_NOZZLE_LABELS, WATER_GUN_UPGRADE_FOCUS_LABELS, WaterGunAmmoType, WaterGunNozzleType, WaterGunProfile } from './WaterGunBalanceTable';
 import { BulletHell } from '../bulletHell';
 import { Bullet } from '../../bulletHell/bullet';
 import { Skill } from '../../bulletHell/skill';
@@ -333,23 +334,56 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
     static CONFIG: SkillConfig = {
         id: 'high_pressure_water_gun',
         name: '高压水枪',
-        description: '发射水柱穿透直线敌人。',
+        description: '持续喷射水流，依据压力、容量、喷嘴与弹药改变清洁方式。',
         icon: 'skill_water_gun',
         ...commonActiveSkillConfig,
     } as SkillConfig;
 
-    private baseDamage = 25;
-    private projectileSpeed = 800;
-    
-    /** 激光扩展时长（秒） */
-    private expandDuration = 0.6;
-    /** 激光缩小时长（秒） */
-    private shrinkDuration = 0.4;
-    /** 激光最大拉伸倍数 */
-    private maxScaleX = 3;
+    private pressureLevel = 1;
+    private tankCapacity = 1.1;
+    private expandDuration = 0.12;
+    private shrinkDuration = 0.18;
+    private readonly visualWidthBaseline = 48;
+    private readonly waterGunOriginOffset = 22;
+    private readonly waterGunDefaultVisualLength = 64;
 
+    private activeOwnerNode: Node | null = null;
     private activeWaterGun: Skill | null = null;
-    private waterGunSpawnTime: number = 0;
+    private activeProfile: WaterGunProfile | null = null;
+    private readonly activeDirection = new Vec3(1, 0, 0);
+    private activeBaseAngle = 0;
+    private activeElapsed = 0;
+    private damageTickElapsed = 0;
+    private readonly waterGunWorldPosition = new Vec3();
+    private readonly waterGunLocalPosition = new Vec3();
+    private readonly waterGunScale = new Vec3(1, 1, 1);
+    private waterGunRootSprite: Sprite | null = null;
+    private waterGunBeamCoreNode: Node | null = null;
+    private waterGunSoftEdgeNode: Node | null = null;
+    private waterGunMuzzleNode: Node | null = null;
+    private waterGunImpactNode: Node | null = null;
+    private readonly waterGunCoreScale = new Vec3(1, 1, 1);
+    private readonly waterGunSoftEdgeScale = new Vec3(1, 1, 1);
+    private readonly waterGunSplashScale = new Vec3(1, 1, 1);
+    private readonly waterGunMuzzleScale = new Vec3(1, 1, 1);
+    private readonly waterGunMuzzleBaseScale = new Vec3(1, 1, 1);
+
+    private getCurrentWaterGunReach(): number {
+        if (!this.activeProfile) {
+            return 0;
+        }
+
+        if (this.activeProfile.nozzleType !== 'direct') {
+            return this.activeProfile.range;
+        }
+
+        const nearestHit = this.collectSprayTargetCandidates(this.activeProfile.range)[0];
+        if (!nearestHit) {
+            return this.activeProfile.range;
+        }
+
+        return Math.max(10, Math.min(this.activeProfile.range, nearestHit.distance));
+    }
 
     constructor(level: number = 1) {
         super(HighPressureWaterGunSkill.CONFIG, level);
@@ -358,8 +392,10 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
     }
 
     private updateByLevel() {
-        this.baseDamage = 25 + 5 * (this.level - 1);
-        this.projectileSpeed = 800 + (this.level - 1) * 50;
+        const profile = createWaterGunProfile(this.level);
+        this.pressureLevel = profile.pressureLevel;
+        this.tankCapacity = profile.sustainDuration;
+        this.cooldown = Math.max(0.78, 1.2 - (this.level - 1) * 0.03);
     }
 
     public levelUp(): void {
@@ -367,33 +403,35 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         this.updateByLevel();
     }
 
+    public getDescription(): string {
+        const profile = this.buildWaterGunProfile();
+        return `${WATER_GUN_UPGRADE_FOCUS_LABELS[profile.upgradeFocus]}: 压力 Lv.${this.pressureLevel}，水箱 ${profile.sustainDuration.toFixed(1)}s，${WATER_GUN_NOZZLE_LABELS[profile.nozzleType]}，${WATER_GUN_AMMO_LABELS[profile.ammoType]}。${profile.upgradeSummary}`;
+    }
+
     public update(dt: number): void {
         super.update(dt);
-        
-        if (!this.activeWaterGun) return;
-        
-        const elapsed = performance.now() * 0.001 - this.waterGunSpawnTime;
-        const totalDuration = this.expandDuration + this.shrinkDuration;
-        
-        let scaleX = 0;
-        
-        if (elapsed < this.expandDuration) {
-            // 展开期：0 -> maxScaleX
-            scaleX = (elapsed / this.expandDuration) * this.maxScaleX;
-        } else if (elapsed < totalDuration) {
-            // 缩小期：maxScaleX -> 0
-            const shrinkElapsed = elapsed - this.expandDuration;
-            scaleX = Math.max(0, this.maxScaleX * (1 - (shrinkElapsed / this.shrinkDuration)));
-        } else {
-            // 完全消失，回收
-            Skill.put(this.activeWaterGun);
-            this.activeWaterGun = null;
+
+        if (!this.activeWaterGun || !this.activeProfile || !this.activeOwnerNode) {
             return;
         }
-        
-        const scale = this.activeWaterGun.node.scale.clone();
-        scale.x = Math.max(0.01, scaleX);
-        this.activeWaterGun.setScale(scale);
+
+        this.activeElapsed += dt;
+        const totalDuration = this.activeProfile.sustainDuration + this.shrinkDuration;
+        if (this.activeElapsed >= totalDuration) {
+            this.clearActiveWaterGun();
+            return;
+        }
+
+        this.damageTickElapsed += dt;
+        this.updateSprayDirection();
+        this.updateWaterGunVisual();
+
+        if (this.activeElapsed <= this.activeProfile.sustainDuration) {
+            while (this.damageTickElapsed >= this.activeProfile.damageTickInterval) {
+                this.damageTickElapsed -= this.activeProfile.damageTickInterval;
+                this.applyContinuousSprayDamage();
+            }
+        }
     }
 
     protected onUse(context: SkillContext): void {
@@ -401,12 +439,13 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         const worldPos = owner.worldPosition;
         const parent = BulletHell.inst?.bullets;
         const prefab = context.payload?.visual?.projectilePrefab ?? null;
-        console.log(`[技能] 高压水枪 (Lv${this.level}) 触发，位置:`, worldPos, `; 接收 prefab:`, prefab?.name || 'null');
 
         if (!parent || !prefab) {
             console.warn('[技能] 高压水枪：缺少 bullets 节点或 prefab，无法生成水柱', { hasParent: !!parent, hasPrefab: !!prefab });
             return;
         }
+
+        const profile = this.buildWaterGunProfile(context);
 
         const target = context.targetPosition ?? worldPos;
         const dir = new Vec3(target.x - worldPos.x, target.y - worldPos.y, 0);
@@ -415,10 +454,7 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         }
         dir.normalize();
 
-        // 回收旧的水枪
-        if (this.activeWaterGun) {
-            Skill.put(this.activeWaterGun);
-        }
+        this.clearActiveWaterGun();
 
         const skill = prefab ? Skill.get(prefab) : null;
         if (!skill) {
@@ -429,33 +465,412 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         skill.insert(parent);
         skill.init();
 
-        // 禁用自动旋转，保持固定朝向
-        (skill as any).disableAutoRotation = true;
+        skill.disableAutoRotation = true;
+        skill.trigger = false;
+        skill.velocity.set(0, 0, 0);
+        skill.lifeTime = profile.sustainDuration + this.shrinkDuration + 0.1;
+        skill.damage = 0;
+        skill.penetration = 9999;
+        skill.knockback = 0;
 
-        const spawnWorldPos = offsetAlongDirection(worldPos, dir, 30);
-        const localPos = new Vec3();
-        Vec3.subtract(localPos, spawnWorldPos, parent.worldPosition);
-        skill.setPosition(localPos);
-
-        // 设置初始旋转，使水柱指向发射方向
-        const angle = Math.atan2(dir.y, dir.x);
-        const rot = new Quat();
-        Quat.rotateZ(rot, Quat.IDENTITY, angle);
-        skill.setRotation(rot);
-
-        skill.velocity.set(dir).multiplyScalar(this.projectileSpeed);
-        skill.lifeTime = this.expandDuration + this.shrinkDuration + 0.1;
-
-        // 伤害/穿透/击退
-        (skill as any).damage = isSkillDamageDisabledForTesting(HighPressureWaterGunSkill.CONFIG.id) ? 0 : this.baseDamage;
-        (skill as any).penetration = 9999; // 无限穿透，可以穿过所有敌人
-        (skill as any).knockback = 180;
-        (skill as any).hitCount = 0;
-
+        this.activeOwnerNode = owner;
         this.activeWaterGun = skill;
-        this.waterGunSpawnTime = performance.now() * 0.001;
+        this.activeProfile = profile;
+        this.activeDirection.set(dir);
+        this.activeBaseAngle = Math.atan2(dir.y, dir.x);
+        this.activeElapsed = this.expandDuration;
+        this.damageTickElapsed = 0;
+        this.cacheWaterGunVisualNodes();
+        this.updateSprayDirection();
+        this.updateWaterGunVisual();
+        this.applyContinuousSprayDamage();
 
-        //console.log(`[技能] 高压水枪 (Lv${this.level}) 发射`);
+        console.log(`[技能] 高压水枪 (Lv${this.level}) 启动：${WATER_GUN_NOZZLE_LABELS[profile.nozzleType]} / ${WATER_GUN_AMMO_LABELS[profile.ammoType]} / 持续 ${profile.sustainDuration.toFixed(1)}s`);
+    }
+
+    private buildWaterGunProfile(context?: SkillContext): WaterGunProfile {
+        const payloadProfile = (context?.payload?.waterGunProfile as Partial<WaterGunProfile> | undefined) ?? undefined;
+        const profile = createWaterGunProfile(this.level, payloadProfile);
+        profile.sustainDuration = Math.max(0.55, profile.sustainDuration);
+        profile.range = Math.min(profile.range, this.getWaterGunMaxRange());
+        return profile;
+    }
+
+    private getWaterGunMaxRange(): number {
+        const visibleWidth = view.getVisibleSize().width;
+        if (visibleWidth <= 0) {
+            return 240;
+        }
+
+        return Math.max(96, visibleWidth * 0.5);
+    }
+
+    private updateSprayDirection(): void {
+        if (!this.activeProfile) {
+            return;
+        }
+
+        if (this.activeProfile.nozzleType !== 'rotary' || this.activeProfile.sweepCycles <= 0 || this.activeProfile.sustainDuration <= 0.0001) {
+            this.activeDirection.set(Math.cos(this.activeBaseAngle), Math.sin(this.activeBaseAngle), 0);
+            return;
+        }
+
+        const sweepAmplitude = this.activeProfile.coneAngle * 0.55;
+        const normalizedTime = Math.min(1, this.activeElapsed / this.activeProfile.sustainDuration);
+        const sweep = Math.sin(normalizedTime * Math.PI * 2 * this.activeProfile.sweepCycles) * sweepAmplitude;
+        const angle = this.activeBaseAngle + sweep;
+        this.activeDirection.set(Math.cos(angle), Math.sin(angle), 0);
+    }
+
+    private updateWaterGunVisual(): void {
+        if (!this.activeOwnerNode || !this.activeWaterGun || !this.activeProfile) {
+            return;
+        }
+
+        const parent = BulletHell.inst?.bullets;
+        if (!parent) {
+            return;
+        }
+
+        const emissionRatio = this.getEmissionRatio(this.activeElapsed, this.activeProfile.sustainDuration);
+        const effectiveReach = this.getCurrentWaterGunReach();
+        const hasLayeredVisuals = !!this.waterGunBeamCoreNode;
+        this.getWaterGunSprayOrigin(this.waterGunWorldPosition);
+        Vec3.subtract(this.waterGunLocalPosition, this.waterGunWorldPosition, parent.worldPosition);
+        this.activeWaterGun.setPosition(this.waterGunLocalPosition);
+
+        const angle = Math.atan2(this.activeDirection.y, this.activeDirection.x);
+        Quat.rotateZ(tempBeamRot, Quat.IDENTITY, angle);
+        this.activeWaterGun.setRotation(tempBeamRot);
+
+        if (hasLayeredVisuals) {
+            this.activeWaterGun.setScale(this.waterGunScale.set(1, 1, 1));
+            this.updateLayeredWaterGunVisual(emissionRatio, effectiveReach);
+            return;
+        }
+
+        const visualLengthScale = this.getWaterGunVisualLengthScale(this.activeWaterGun.node, emissionRatio, effectiveReach);
+        const widthPulse = this.getWaterGunWidthPulse();
+        this.waterGunScale.set(
+            visualLengthScale,
+            Math.max(0.18, this.activeProfile.beamWidth / this.visualWidthBaseline) * widthPulse,
+            1
+        );
+        this.activeWaterGun.setScale(this.waterGunScale);
+
+        const fallbackSprite = this.activeWaterGun.node.getComponent(Sprite);
+        if (fallbackSprite) {
+            fallbackSprite.color = this.getWaterGunPalette(this.activeProfile.ammoType).core;
+        }
+    }
+
+    private cacheWaterGunVisualNodes(): void {
+        const root = this.activeWaterGun?.node;
+        this.waterGunRootSprite = root?.getComponent(Sprite) ?? null;
+        this.waterGunBeamCoreNode = root?.getChildByName('BeamCore') ?? null;
+        this.waterGunSoftEdgeNode = root?.getChildByName('BeamSoftEdge') ?? null;
+        this.waterGunMuzzleNode = root?.getChildByName('MuzzleFlash') ?? null;
+        this.waterGunImpactNode = root?.getChildByName('ImpactSplash') ?? null;
+
+        if (this.waterGunMuzzleNode) {
+            this.waterGunMuzzleBaseScale.set(this.waterGunMuzzleNode.scale);
+        } else {
+            this.waterGunMuzzleBaseScale.set(1, 1, 1);
+        }
+
+        if (root && !this.waterGunBeamCoreNode) {
+            console.warn('[技能] 高压水枪：未找到 BeamCore，回退为单 Sprite 显示');
+        }
+
+        this.waterGunBeamCoreNode && (this.waterGunBeamCoreNode.active = true);
+        this.waterGunSoftEdgeNode && (this.waterGunSoftEdgeNode.active = true);
+        this.waterGunMuzzleNode && (this.waterGunMuzzleNode.active = true);
+        this.waterGunImpactNode && (this.waterGunImpactNode.active = true);
+
+        if (this.waterGunRootSprite) {
+            this.waterGunRootSprite.enabled = true;
+            this.waterGunRootSprite.color = this.getWaterGunPalette(this.activeProfile?.ammoType ?? 'none').core;
+        }
+    }
+
+    private updateLayeredWaterGunVisual(emissionRatio: number, effectiveReach: number): void {
+        if (!this.activeProfile) {
+            return;
+        }
+
+        const palette = this.getWaterGunPalette(this.activeProfile.ammoType);
+        const pulse = this.activeProfile.nozzleType === 'rotary'
+            ? 0.92 + Math.abs(Math.sin(this.activeElapsed * 12)) * 0.24
+            : 1;
+        const widthPulse = this.getWaterGunWidthPulse();
+
+        const coreLengthScale = this.getWaterGunVisualLengthScale(this.waterGunBeamCoreNode, emissionRatio, effectiveReach);
+        const coreWidthScale = Math.max(0.22, this.activeProfile.beamWidth / this.visualWidthBaseline) * widthPulse;
+        const edgeWidthScale = coreWidthScale * (this.activeProfile.nozzleType === 'fan' ? 1.45 : 1.18);
+        const splashScale = (0.68 + coreWidthScale * 0.42) * (this.activeProfile.nozzleType === 'fan' ? 1.2 : pulse);
+
+        this.waterGunCoreScale.set(coreLengthScale, coreWidthScale, 1);
+        this.waterGunSoftEdgeScale.set(coreLengthScale * 1.03, edgeWidthScale, 1);
+        this.waterGunSplashScale.set(splashScale, splashScale, 1);
+        this.waterGunMuzzleScale.set(this.waterGunMuzzleBaseScale);
+
+        this.waterGunBeamCoreNode?.setScale(this.waterGunCoreScale);
+        this.waterGunSoftEdgeNode?.setScale(this.waterGunSoftEdgeScale);
+        this.waterGunMuzzleNode?.setScale(this.waterGunMuzzleScale);
+        this.waterGunImpactNode?.setScale(this.waterGunSplashScale);
+
+        const beamLength = this.getScaledNodeLength(this.waterGunBeamCoreNode, this.waterGunCoreScale.x);
+        if (this.waterGunSoftEdgeNode) {
+            this.waterGunSoftEdgeNode.setPosition(-2, 0, 0);
+        }
+        if (this.waterGunMuzzleNode) {
+            this.waterGunMuzzleNode.setPosition(0, 0, 0);
+        }
+        if (this.waterGunImpactNode) {
+            const impactOffset = this.activeProfile.nozzleType === 'direct' ? Math.max(8, beamLength - 2) : Math.max(10, beamLength - 6);
+            this.waterGunImpactNode.setPosition(impactOffset, 0, 0);
+            this.waterGunImpactNode.active = this.activeProfile.nozzleType !== 'direct' || effectiveReach < this.activeProfile.range;
+        }
+
+        this.tintWaterGunNode(this.waterGunBeamCoreNode, palette.core, emissionRatio);
+        this.tintWaterGunNode(this.waterGunSoftEdgeNode, palette.edge, emissionRatio);
+        this.tintWaterGunNode(this.waterGunMuzzleNode, palette.muzzle, Math.min(1, emissionRatio * 1.1));
+        this.tintWaterGunNode(this.waterGunImpactNode, palette.impact, Math.min(1, emissionRatio * 1.05));
+    }
+
+    private getScaledNodeLength(node: Node | null, scaleX: number): number {
+        return Math.max(1, this.getWaterGunBaseLength(node) * scaleX);
+    }
+
+    private getWaterGunBaseLength(node: Node | null): number {
+        const transform = node?.getComponent(UITransform);
+        return Math.max(1, transform?.contentSize.width ?? this.waterGunDefaultVisualLength);
+    }
+
+    private getWaterGunVisualLengthScale(node: Node | null, emissionRatio: number, visualDistance?: number): number {
+        if (!this.activeProfile) {
+            return 1;
+        }
+
+        const baseLength = this.getWaterGunBaseLength(node);
+        const visualLength = Math.max(6, (visualDistance ?? this.activeProfile.range) * emissionRatio);
+        return Math.max(0.08, visualLength / baseLength);
+    }
+
+    private getWaterGunWidthPulse(): number {
+        const amplitude = this.activeProfile?.nozzleType === 'rotary' ? 0.16 : 0.12;
+        return 1 + Math.sin(this.activeElapsed * 16) * amplitude;
+    }
+
+    private getWaterGunSprayOrigin(out: Vec3): Vec3 {
+        if (!this.activeOwnerNode) {
+            return out.set(0, 0, 0);
+        }
+
+        return out.set(
+            this.activeOwnerNode.worldPosition.x + this.activeDirection.x * this.waterGunOriginOffset,
+            this.activeOwnerNode.worldPosition.y + this.activeDirection.y * this.waterGunOriginOffset,
+            this.activeOwnerNode.worldPosition.z
+        );
+    }
+
+    private tintWaterGunNode(node: Node | null, color: Color, alphaScale: number): void {
+        const sprite = node?.getComponent(Sprite);
+        if (!sprite) {
+            return;
+        }
+
+        this.tintWaterGunSprite(sprite, color, alphaScale);
+    }
+
+    private tintWaterGunSprite(sprite: Sprite | null, color: Color, alphaScale: number): void {
+        if (!sprite) {
+            return;
+        }
+
+        sprite.color = new Color(
+            color.r,
+            color.g,
+            color.b,
+            Math.max(0, Math.min(255, Math.round(color.a * alphaScale)))
+        );
+    }
+
+    private getWaterGunPalette(ammoType: WaterGunAmmoType): { core: Color; edge: Color; muzzle: Color; impact: Color } {
+        switch (ammoType) {
+            case 'hot':
+                return {
+                    core: new Color(255, 235, 190, 255),
+                    edge: new Color(255, 179, 112, 154),
+                    muzzle: new Color(255, 246, 214, 232),
+                    impact: new Color(255, 188, 120, 214),
+                };
+            case 'soap':
+                return {
+                    core: new Color(214, 245, 255, 255),
+                    edge: new Color(173, 226, 255, 148),
+                    muzzle: new Color(245, 252, 255, 232),
+                    impact: new Color(214, 244, 255, 204),
+                };
+            case 'ice':
+                return {
+                    core: new Color(184, 239, 255, 255),
+                    edge: new Color(110, 206, 255, 156),
+                    muzzle: new Color(228, 249, 255, 228),
+                    impact: new Color(152, 225, 255, 214),
+                };
+            case 'none':
+            default:
+                return {
+                    core: new Color(120, 198, 255, 255),
+                    edge: new Color(176, 228, 255, 136),
+                    muzzle: new Color(240, 249, 255, 218),
+                    impact: new Color(178, 228, 255, 186),
+                };
+        }
+    }
+
+    private getEmissionRatio(elapsed: number, sustainDuration: number): number {
+        if (elapsed <= this.expandDuration) {
+            return Math.max(0.35, elapsed / Math.max(0.001, this.expandDuration));
+        }
+
+        if (elapsed <= sustainDuration) {
+            return 1;
+        }
+
+        const fadeElapsed = elapsed - sustainDuration;
+        return Math.max(0.05, 1 - fadeElapsed / Math.max(0.001, this.shrinkDuration));
+    }
+
+    private applyContinuousSprayDamage(): void {
+        if (!this.activeOwnerNode || !this.activeProfile) {
+            return;
+        }
+
+        if (isSkillDamageDisabledForTesting(HighPressureWaterGunSkill.CONFIG.id)) {
+            return;
+        }
+
+        const enemies = this.collectSprayTargets();
+        for (const enemy of enemies) {
+            const damage = this.getDamageForEnemy(enemy, this.activeProfile);
+            if (damage <= 0) {
+                continue;
+            }
+
+            enemy.takeDamage(damage, this.activeOwnerNode);
+
+            if (this.activeProfile.knockback > 0) {
+                enemy.applyKnockback(this.activeDirection, this.activeProfile.knockback, 0.12);
+            }
+
+            if (this.activeProfile.ammoType === 'ice' && this.activeProfile.slowDuration > 0) {
+                enemy.applyMovementDebuff(this.activeProfile.slowDuration, this.activeProfile.slowMultiplier);
+            }
+        }
+    }
+
+    private collectSprayTargets(): Enemy[] {
+        const effectiveReach = this.getCurrentWaterGunReach();
+        const candidates = this.collectSprayTargetCandidates(effectiveReach);
+        if (!this.activeProfile) {
+            return [];
+        }
+
+        if (this.activeProfile.nozzleType === 'direct') {
+            return candidates.slice(0, 1).map(item => item.enemy);
+        }
+
+        return candidates.map(item => item.enemy);
+    }
+
+    private collectSprayTargetCandidates(maxDistanceOverride?: number): Array<{ enemy: Enemy; distance: number }> {
+        if (!this.activeOwnerNode || !this.activeProfile) {
+            return [];
+        }
+
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            return [];
+        }
+
+        const candidates: Array<{ enemy: Enemy; distance: number }> = [];
+        const origin = this.getWaterGunSprayOrigin(this.waterGunWorldPosition);
+        const maxForwardDistance = Math.max(0, Math.min(maxDistanceOverride ?? this.activeProfile.range, this.activeProfile.range));
+        const maxRadiusDistance = this.activeProfile.range;
+        const halfBeamWidth = this.activeProfile.beamWidth * 0.5;
+        const halfCone = this.activeProfile.coneAngle * 0.5;
+        const facing = this.activeDirection.clone().normalize();
+
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead) {
+                continue;
+            }
+
+            const deltaX = enemyNode.worldPosition.x - origin.x;
+            const deltaY = enemyNode.worldPosition.y - origin.y;
+            const distance = Math.sqrt(deltaX * deltaX + deltaY * deltaY);
+            if (distance > maxRadiusDistance || distance <= 0.0001) {
+                continue;
+            }
+
+            const forwardDot = Math.max(-1, Math.min(1, (deltaX / distance) * facing.x + (deltaY / distance) * facing.y));
+            const angle = Math.acos(forwardDot);
+            if (angle > halfCone) {
+                continue;
+            }
+
+            const projection = deltaX * facing.x + deltaY * facing.y;
+            if (projection <= 0.0001 || projection > maxForwardDistance) {
+                continue;
+            }
+
+            const perpendicular = Math.sqrt(Math.max(0, distance * distance - projection * projection));
+            if (this.activeProfile.nozzleType === 'direct' && perpendicular > halfBeamWidth) {
+                continue;
+            }
+
+            candidates.push({ enemy, distance: projection });
+        }
+
+        candidates.sort((left, right) => left.distance - right.distance);
+        return candidates;
+    }
+
+    private getDamageForEnemy(enemy: Enemy, profile: WaterGunProfile): number {
+        let damage = profile.damagePerTick;
+        if (profile.ammoType === 'hot' && this.isOilContaminantEnemy(enemy)) {
+            damage *= 1.5;
+        }
+
+        return damage;
+    }
+
+    private isOilContaminantEnemy(enemy: Enemy): boolean {
+        const rawType = `${(enemy as any).enemyType ?? ''} ${enemy.node.name ?? ''}`.toLowerCase();
+        return /oil|grease|slime|youwu|油污|油渍/.test(rawType);
+    }
+
+    private clearActiveWaterGun(): void {
+        if (this.activeWaterGun) {
+            Skill.put(this.activeWaterGun);
+            this.activeWaterGun = null;
+        }
+
+        this.activeOwnerNode = null;
+        this.activeProfile = null;
+        this.activeElapsed = 0;
+        this.damageTickElapsed = 0;
+        this.activeBaseAngle = 0;
+        this.activeDirection.set(1, 0, 0);
+        this.waterGunBeamCoreNode = null;
+        this.waterGunSoftEdgeNode = null;
+        this.waterGunMuzzleNode = null;
+        this.waterGunImpactNode = null;
+        this.waterGunRootSprite = null;
+        this.waterGunMuzzleBaseScale.set(1, 1, 1);
     }
 }
 
