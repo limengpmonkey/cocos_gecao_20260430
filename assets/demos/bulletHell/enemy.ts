@@ -93,6 +93,7 @@ export class Enemy extends cObject {
     private _bossSpriteColor: Color = new Color(255, 180, 80, 255);
     private _eliteSpriteColor: Color = new Color(120, 240, 255, 255);
     private _bossEntranceFlashColor: Color = new Color(255, 255, 255, 255);
+    private readonly _hitFlashTintColor: Color = new Color(212, 224, 236, 255);
     
     // ✅ 新添加：游戏状态控制
     private _isGamePaused: boolean = false;
@@ -714,7 +715,7 @@ export class Enemy extends cObject {
 
     /** 播放被击中特效（缩放+闪烁） */
     protected playHitEffect(): void {
-        const sprite = this.node.getComponent(Sprite);
+        const sprite = this.node.getComponent(Sprite) ?? this.node.getComponentInChildren(Sprite);
         const originalScale = this.node.scale.clone();
 
         // 缩放效果
@@ -726,11 +727,20 @@ export class Enemy extends cObject {
             this.node.setScale(originalScale);
         }, 0.1);
 
-        // 闪烁颜色效果（如果有 Sprite）
+        // 保留原来的“放大一下再恢复”，颜色改成更克制的浅灰蓝。
         if (sprite) {
             const originalColor = sprite.color.clone();
-            sprite.color = Color.RED;
+            sprite.color = new Color(
+                this._hitFlashTintColor.r,
+                this._hitFlashTintColor.g,
+                this._hitFlashTintColor.b,
+                originalColor.a
+            );
             this.scheduleOnce(() => {
+                if (!sprite || !sprite.isValid) {
+                    return;
+                }
+
                 sprite.color = originalColor;
             }, 0.1);
         }

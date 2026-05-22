@@ -11,7 +11,7 @@
  * 这些实现侧重于可扩展性，能为后续的技能融合、技能树等功能提供基础。
  */
 
-import { Animation, Color, Vec3, Node, Quat, Sprite, tween, PhysicsSystem, UITransform, view } from 'cc';
+import { Animation, Color, Component, Vec3, Node, ParticleSystem2D, Quat, Sprite, tween, PhysicsSystem, UITransform, view } from 'cc';
 import { ActiveSkill } from './ActiveSkill';
 import { BoostSkill } from './BoostSkill';
 import { SummonSkill } from './SummonSkill';
@@ -362,11 +362,25 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
     private waterGunSoftEdgeNode: Node | null = null;
     private waterGunMuzzleNode: Node | null = null;
     private waterGunImpactNode: Node | null = null;
+    private waterGunMuzzleParticle: ParticleSystem2D | null = null;
+    private waterGunImpactParticle: ParticleSystem2D | null = null;
+    private isWaterGunImpactParticleActive = false;
     private readonly waterGunCoreScale = new Vec3(1, 1, 1);
     private readonly waterGunSoftEdgeScale = new Vec3(1, 1, 1);
     private readonly waterGunSplashScale = new Vec3(1, 1, 1);
     private readonly waterGunMuzzleScale = new Vec3(1, 1, 1);
     private readonly waterGunMuzzleBaseScale = new Vec3(1, 1, 1);
+    private readonly waterGunKnockbackMultiplier = 1.35;
+    private readonly waterGunKnockbackDuration = 0.18;
+    private readonly waterGunContactKnockbackMultiplier = 2.7;
+    private readonly waterGunContactKnockbackDuration = 0.12;
+    private readonly transformedWaterGunBeamWidthMultiplier = 2;
+    private static readonly CARDINAL_DIRECTIONS = [
+        new Vec3(1, 0, 0),
+        new Vec3(-1, 0, 0),
+        new Vec3(0, 1, 0),
+        new Vec3(0, -1, 0),
+    ];
 
     private getCurrentWaterGunReach(): number {
         if (!this.activeProfile) {
@@ -427,6 +441,7 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         this.updateWaterGunVisual();
 
         if (this.activeElapsed <= this.activeProfile.sustainDuration) {
+            this.applyContinuousSprayContactKnockback();
             while (this.damageTickElapsed >= this.activeProfile.damageTickInterval) {
                 this.damageTickElapsed -= this.activeProfile.damageTickInterval;
                 this.applyContinuousSprayDamage();
@@ -450,7 +465,7 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         const target = context.targetPosition ?? worldPos;
         const dir = new Vec3(target.x - worldPos.x, target.y - worldPos.y, 0);
         if (dir.lengthSqr() < 0.0001) {
-            dir.set(1, 0, 0);
+            dir.set(this.getRandomCardinalDirection());
         }
         dir.normalize();
 
@@ -481,11 +496,20 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         this.activeElapsed = this.expandDuration;
         this.damageTickElapsed = 0;
         this.cacheWaterGunVisualNodes();
+        this.playWaterGunParticle(this.waterGunMuzzleParticle, true);
+        this.stopWaterGunParticle(this.waterGunImpactParticle, true);
+        this.isWaterGunImpactParticleActive = false;
         this.updateSprayDirection();
         this.updateWaterGunVisual();
+        this.applyContinuousSprayContactKnockback();
         this.applyContinuousSprayDamage();
 
         console.log(`[技能] 高压水枪 (Lv${this.level}) 启动：${WATER_GUN_NOZZLE_LABELS[profile.nozzleType]} / ${WATER_GUN_AMMO_LABELS[profile.ammoType]} / 持续 ${profile.sustainDuration.toFixed(1)}s`);
+    }
+
+    private getRandomCardinalDirection(): Vec3 {
+        const directions = HighPressureWaterGunSkill.CARDINAL_DIRECTIONS;
+        return directions[Math.floor(Math.random() * directions.length)];
     }
 
     private buildWaterGunProfile(context?: SkillContext): WaterGunProfile {
@@ -493,6 +517,9 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         const profile = createWaterGunProfile(this.level, payloadProfile);
         profile.sustainDuration = Math.max(0.55, profile.sustainDuration);
         profile.range = Math.min(profile.range, this.getWaterGunMaxRange());
+        if (this.level >= HighPressureWaterGunSkill.CONFIG.transformLevel) {
+            profile.beamWidth *= this.transformedWaterGunBeamWidthMultiplier;
+        }
         return profile;
     }
 
@@ -571,6 +598,9 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         this.waterGunSoftEdgeNode = root?.getChildByName('BeamSoftEdge') ?? null;
         this.waterGunMuzzleNode = root?.getChildByName('MuzzleFlash') ?? null;
         this.waterGunImpactNode = root?.getChildByName('ImpactSplash') ?? null;
+        this.waterGunMuzzleParticle = this.getWaterGunParticle(this.waterGunMuzzleNode);
+        this.waterGunImpactParticle = this.getWaterGunParticle(this.waterGunImpactNode);
+        this.isWaterGunImpactParticleActive = false;
 
         if (this.waterGunMuzzleNode) {
             this.waterGunMuzzleBaseScale.set(this.waterGunMuzzleNode.scale);
@@ -631,6 +661,7 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
             this.waterGunImpactNode.setPosition(impactOffset, 0, 0);
             this.waterGunImpactNode.active = this.activeProfile.nozzleType !== 'direct' || effectiveReach < this.activeProfile.range;
         }
+        this.updateWaterGunImpactParticle();
 
         this.tintWaterGunNode(this.waterGunBeamCoreNode, palette.core, emissionRatio);
         this.tintWaterGunNode(this.waterGunSoftEdgeNode, palette.edge, emissionRatio);
@@ -672,6 +703,56 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
             this.activeOwnerNode.worldPosition.y + this.activeDirection.y * this.waterGunOriginOffset,
             this.activeOwnerNode.worldPosition.z
         );
+    }
+
+    private getWaterGunParticle(node: Node | null): ParticleSystem2D | null {
+        if (!node) {
+            return null;
+        }
+
+        const direct = node.getComponent('ParticleSystem2D') as ParticleSystem2D | null;
+        if (direct) {
+            return direct;
+        }
+
+        const nested = node.getComponentInChildren('ParticleSystem2D') as Component | null;
+        return nested as ParticleSystem2D | null;
+    }
+
+    private playWaterGunParticle(particle: ParticleSystem2D | null, reset: boolean = false): void {
+        if (!particle) {
+            return;
+        }
+
+        if (reset) {
+            particle.resetSystem();
+            return;
+        }
+
+        particle.resetSystem();
+    }
+
+    private stopWaterGunParticle(particle: ParticleSystem2D | null, clear: boolean = false): void {
+        if (!particle) {
+            return;
+        }
+
+        particle.stopSystem();
+    }
+
+    private updateWaterGunImpactParticle(): void {
+        const shouldPlay = !!this.waterGunImpactNode?.active;
+        if (shouldPlay === this.isWaterGunImpactParticleActive) {
+            return;
+        }
+
+        this.isWaterGunImpactParticleActive = shouldPlay;
+        if (shouldPlay) {
+            this.playWaterGunParticle(this.waterGunImpactParticle, true);
+            return;
+        }
+
+        this.stopWaterGunParticle(this.waterGunImpactParticle, true);
     }
 
     private tintWaterGunNode(node: Node | null, color: Color, alphaScale: number): void {
@@ -761,13 +842,36 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
 
             enemy.takeDamage(damage, this.activeOwnerNode);
 
-            if (this.activeProfile.knockback > 0) {
-                enemy.applyKnockback(this.activeDirection, this.activeProfile.knockback, 0.12);
+            if (this.activeProfile.knockback > 0 && enemy.isBoss) {
+                enemy.applyKnockback(
+                    this.activeDirection,
+                    this.activeProfile.knockback * this.waterGunKnockbackMultiplier,
+                    this.waterGunKnockbackDuration
+                );
             }
 
             if (this.activeProfile.ammoType === 'ice' && this.activeProfile.slowDuration > 0) {
                 enemy.applyMovementDebuff(this.activeProfile.slowDuration, this.activeProfile.slowMultiplier);
             }
+        }
+    }
+
+    private applyContinuousSprayContactKnockback(): void {
+        if (!this.activeOwnerNode || !this.activeProfile || this.activeProfile.knockback <= 0) {
+            return;
+        }
+
+        const enemies = this.collectSprayTargets();
+        for (const enemy of enemies) {
+            if (enemy.isBoss) {
+                continue;
+            }
+
+            enemy.applyKnockback(
+                this.activeDirection,
+                this.activeProfile.knockback * this.waterGunContactKnockbackMultiplier,
+                this.waterGunContactKnockbackDuration
+            );
         }
     }
 
@@ -869,6 +973,11 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
         this.waterGunSoftEdgeNode = null;
         this.waterGunMuzzleNode = null;
         this.waterGunImpactNode = null;
+        this.stopWaterGunParticle(this.waterGunMuzzleParticle, true);
+        this.stopWaterGunParticle(this.waterGunImpactParticle, true);
+        this.waterGunMuzzleParticle = null;
+        this.waterGunImpactParticle = null;
+        this.isWaterGunImpactParticleActive = false;
         this.waterGunRootSprite = null;
         this.waterGunMuzzleBaseScale.set(1, 1, 1);
     }
@@ -887,7 +996,9 @@ export class TrashBagFieldSkill extends ActiveSkill {
     private radius = 120;
     private readonly damagePerTick = 8;
     private readonly tickInterval = 0.25;
-    private readonly visualBaseRadius = 120;
+    private readonly visualBaseRadiusFallback = 120;
+    private slowDuration = 0.36;
+    private slowMultiplier = 0.76;
 
     private isFieldActive = false;
     private fieldElapsed = 0;
@@ -906,6 +1017,8 @@ export class TrashBagFieldSkill extends ActiveSkill {
         // 升级路线：仅提升范围与持续时间
         this.radius = 120 + this.level * 14;
         this.duration = 4 + this.level * 0.8;
+        this.slowDuration = 0.34 + this.level * 0.02;
+        this.slowMultiplier = Math.max(0.48, 0.8 - this.level * 0.025);
     }
 
     public levelUp(): void {
@@ -936,7 +1049,9 @@ export class TrashBagFieldSkill extends ActiveSkill {
 
     protected onUse(context: SkillContext): void {
         const origin = context.ownerNode.worldPosition;
-        const parent = BulletHell.inst?.bullets;
+        const bulletsParent = BulletHell.inst?.bullets;
+        const objectsParent = BulletHell.inst?.objects;
+        const visualParent = objectsParent?.parent ?? bulletsParent;
         const prefab = context.payload?.visual?.projectilePrefab ?? null;
 
         //console.log(`[技能] 垃圾袋领域 (Lv${this.level}) 放置，持续 ${this.duration.toFixed(1)}s，范围 ${this.radius}`);
@@ -952,21 +1067,25 @@ export class TrashBagFieldSkill extends ActiveSkill {
         // 立即结算一跳伤害，让技能触发反馈更直接。
         this.applyAreaDamage();
 
-        if (parent && prefab) {
+        if (visualParent && prefab) {
             const visual = Skill.get(prefab);
             if (visual) {
-                visual.insert(parent);
+                visual.insert(visualParent);
                 visual.init();
 
+                if (objectsParent && visual.node.parent === objectsParent.parent) {
+                    visual.node.setSiblingIndex(objectsParent.getSiblingIndex());
+                }
+
                 const localPos = new Vec3();
-                Vec3.subtract(localPos, this.fieldCenter, parent.worldPosition);
+                Vec3.subtract(localPos, this.fieldCenter, visualParent.worldPosition);
                 visual.setPosition(localPos);
                 visual.velocity.set(0, 0, 0);
                 visual.lifeTime = this.duration + 0.1;
                 visual.disableAutoRotation = true;
                 visual.trigger = false;
 
-                const scaleRatio = Math.max(0.1, this.radius / this.visualBaseRadius);
+                const scaleRatio = Math.max(0.1, this.radius / this.getTrashBagVisualBaseRadius(visual.node));
                 visual.setScale(new Vec3(scaleRatio, scaleRatio, 1));
 
                 this.activeFieldVisual = visual;
@@ -1004,8 +1123,24 @@ export class TrashBagFieldSkill extends ActiveSkill {
             const dy = enemyPos.y - this.fieldCenter.y;
             if (dx * dx + dy * dy <= radiusSqr) {
                 enemy.takeDamage(this.damagePerTick, this.fieldOwnerNode);
+                enemy.applyMovementDebuff(
+                    this.slowDuration,
+                    enemy.isBoss ? Math.max(0.75, this.slowMultiplier + 0.18) : this.slowMultiplier
+                );
             }
         }
+    }
+
+    private getTrashBagVisualBaseRadius(node: Node): number {
+        const transform = node.getComponent(UITransform);
+        if (!transform) {
+            return this.visualBaseRadiusFallback;
+        }
+
+        return Math.max(
+            1,
+            Math.max(transform.contentSize.width, transform.contentSize.height) * 0.5
+        );
     }
 
     private clearField(): void {

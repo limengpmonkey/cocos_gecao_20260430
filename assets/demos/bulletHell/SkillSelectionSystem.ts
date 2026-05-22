@@ -122,7 +122,7 @@ export class SkillSelectionSystem extends Component {
      * 【测试用】单技能测试模式。填写技能 ID 后，弹出的所有卡片都会变成这个技能。
      */
     @property({ tooltip: '【测试】单技能测试 ID。填写后，本次弹窗所有卡片都会固定为该技能；留空则关闭。' })
-    debugForceSingleSkillId: string = 'high_pressure_water_gun';
+    debugForceSingleSkillId: string = '';
 
     /**
      * 【测试用】关闭当前单技能测试目标的伤害，仅保留表现和行为。
