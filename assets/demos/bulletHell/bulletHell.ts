@@ -13,6 +13,7 @@ import { SnailTail } from './snailTail';
 import { Skill } from './skill';
 import { PickupEffectType, TemporaryPickup } from './TemporaryPickup';
 import { EliteSkillType, StageBalanceTable, getDefaultBalanceTables, samplePressureAtTime } from './balanceTable';
+import { CollectionDefinition, CollectionSystem } from './CollectionSystem';
 const { ccclass, property } = _decorator;
 
 const tempPos = new Vec3();
@@ -220,6 +221,27 @@ export class BulletHell extends Component {
     @property({ group: 'Balance Config', tooltip: '启用配置表驱动的节奏系统（经验/压力曲线/精英/资源）' })
     enableBalanceTable: boolean = true;
 
+    @property({ group: 'Collection Config', tooltip: '启用稀有收藏敌人随机刷新' })
+    rareSpawnEnabled: boolean = true;
+
+    @property({ group: 'Collection Config', tooltip: '稀有收藏敌人最早出现时间（秒）' })
+    rareSpawnStartTime: number = 28;
+
+    @property({ group: 'Collection Config', tooltip: '稀有收藏敌人最短刷新间隔（秒）' })
+    rareSpawnIntervalMin: number = 16;
+
+    @property({ group: 'Collection Config', tooltip: '稀有收藏敌人最长刷新间隔（秒）' })
+    rareSpawnIntervalMax: number = 28;
+
+    @property({ group: 'Collection Config', tooltip: '稀有收藏敌人基础出现概率' })
+    rareSpawnChance: number = 0.42;
+
+    @property({ group: 'Collection Config', tooltip: '连续未出现时的保底概率增量' })
+    rareSpawnPityBonus: number = 0.12;
+
+    @property({ type: CCInteger, group: 'Collection Config', tooltip: '同屏稀有收藏敌人上限' })
+    rareMaxAlive: number = 1;
+
     //自行扩展控制策略
     //....
 
@@ -245,6 +267,8 @@ export class BulletHell extends Component {
     private _balanceTables: StageBalanceTable[] = [];
     private _stageElapsedTime = 0;
     private _nextEliteSpawnTime = 0;
+    private _nextRareSpawnTime = 0;
+    private _rareSpawnMissStreak = 0;
     private _lastReliefDropTime = -9999;
     private _reliefCheckTimer = 0;
 
@@ -299,6 +323,8 @@ export class BulletHell extends Component {
         this._bossIntroGunsLocked = false;
         this._stageElapsedTime = 0;
         this._nextEliteSpawnTime = 0;
+        this._nextRareSpawnTime = Math.max(1, this.rareSpawnStartTime);
+        this._rareSpawnMissStreak = 0;
         this._lastReliefDropTime = -9999;
         this._reliefCheckTimer = 0;
 
@@ -412,6 +438,11 @@ export class BulletHell extends Component {
             this._totalKills += 1;
             this._totalScore += Math.max(0, data.score || 0);
             this._stageScore += Math.max(0, data.score || 0);
+
+            const collectionResult = CollectionSystem.recordEnemyKill(data);
+            if (collectionResult.unlockedNow && collectionResult.snapshot) {
+                console.log(`[Collection] 已解锁卡片：${collectionResult.snapshot.definition.name}`);
+            }
         }
 
         if (data.isBoss) {
@@ -547,6 +578,7 @@ export class BulletHell extends Component {
         }
 
         enemy.setBossMode(true, hpMultiplier, expMultiplier, scoreMultiplier);
+        this.applyCollectionMetadataForBoss(enemy, bossKind);
         enemy.insert(this.objects);
 
         // 斗兽场开场：以 Boss 出现点作为战场中心，避免与玩家重叠并强调关底仪式感。
@@ -675,6 +707,7 @@ export class BulletHell extends Component {
 
         enemy.setBossMode(false);
         enemy.setEliteMode(false, EliteSkillType.Dash);
+        this.applyCollectionMetadataForRegularEnemy(enemy, config.kind);
         enemy.setDifficultyScaling(pressure.normalHpMul, pressure.normalSpeedMul, 1, 1);
         enemy.insert(this.objects);
         const { minRadius, maxRadius } = this.getRegularSpawnRadiusRange();
@@ -720,6 +753,7 @@ export class BulletHell extends Component {
 
         enemy.setBossMode(false);
         enemy.setEliteMode(true, rule.skillType, rule.skillCooldown, rule.explodeRadius, rule.explodeDamage);
+        this.applyCollectionMetadataForRegularEnemy(enemy, selected.kind);
         enemy.setDifficultyScaling(
             pressure.normalHpMul * rule.hpMul,
             pressure.normalSpeedMul * rule.speedMul,
@@ -1160,6 +1194,116 @@ export class BulletHell extends Component {
         return null;
     }
 
+    private getCollectionIdForRegularKind(kind: EnemyKind): string {
+        return kind === EnemyKind.SnailTail ? 'snail_tail' : 'ghost';
+    }
+
+    private getCollectionIdForBossKind(kind: EnemyKind): string {
+        return kind === EnemyKind.SnailTail ? 'snail_tail_boss' : 'ghost_boss';
+    }
+
+    private applyCollectionMetadataForRegularEnemy(enemy: Enemy, kind: EnemyKind): void {
+        const definition = CollectionSystem.getDefinition(this.getCollectionIdForRegularKind(kind));
+        enemy.resetCollectionMetadata();
+        if (definition) {
+            enemy.setCollectionMetadata(definition.id, definition.name, false);
+        }
+    }
+
+    private applyCollectionMetadataForBoss(enemy: Enemy, kind: EnemyKind): void {
+        const definition = CollectionSystem.getDefinition(this.getCollectionIdForBossKind(kind));
+        enemy.resetCollectionMetadata();
+        if (definition) {
+            enemy.setCollectionMetadata(definition.id, definition.name, false);
+        }
+    }
+
+    private scheduleNextRareSpawn(): void {
+        const minInterval = Math.max(6, this.rareSpawnIntervalMin);
+        const maxInterval = Math.max(minInterval, this.rareSpawnIntervalMax);
+        const interval = minInterval + Math.random() * (maxInterval - minInterval);
+        this._nextRareSpawnTime = this._stageElapsedTime + interval;
+    }
+
+    private pickRareCollectionDefinition(): CollectionDefinition | null {
+        const candidates = CollectionSystem.getPreferredRareDefinitions();
+        if (candidates.length <= 0) {
+            return null;
+        }
+
+        return candidates[Math.floor(Math.random() * candidates.length)] ?? null;
+    }
+
+    private countAliveRareCollectionEnemies(): number {
+        if (!this.objects) {
+            return 0;
+        }
+
+        let count = 0;
+        for (const child of this.objects.children) {
+            const enemy = child.getComponent(Enemy);
+            if (!enemy || enemy.isDead || enemy.isBoss) {
+                continue;
+            }
+
+            if (enemy.isRareCollectionTarget) {
+                count++;
+            }
+        }
+
+        return count;
+    }
+
+    private trySpawnRareCollectionEnemy(): void {
+        if (!this.rareSpawnEnabled || this._bossAlive || this._bossSpawnQueued || this._bossSpawned) {
+            return;
+        }
+
+        if (!this.objects || this.objects.children.length >= this.getCurrentStageMaxEnemies()) {
+            return;
+        }
+
+        if (this.countAliveRareCollectionEnemies() >= Math.max(1, this.rareMaxAlive)) {
+            return;
+        }
+
+        const chance = Math.min(0.95, Math.max(0.05, this.rareSpawnChance + this._rareSpawnMissStreak * this.rareSpawnPityBonus));
+        if (Math.random() > chance) {
+            this._rareSpawnMissStreak += 1;
+            return;
+        }
+
+        const definition = this.pickRareCollectionDefinition();
+        if (!definition) {
+            return;
+        }
+
+        const kind = definition.id === 'rare_can_mimic' ? EnemyKind.SnailTail : EnemyKind.Ghost;
+        const prefab = kind === EnemyKind.SnailTail ? this.snailTail : this.ghost;
+        const enemy = prefab ? this.getEnemyFromPrefab(kind, prefab) : null;
+        if (!enemy) {
+            return;
+        }
+
+        const pressure = this.getCurrentPressureSample();
+        const rareSkillType = definition.id === 'rare_can_mimic' ? EliteSkillType.Explode : EliteSkillType.Ranged;
+
+        enemy.setBossMode(false);
+        enemy.setEliteMode(true, rareSkillType, 2.4, 110, 18);
+        enemy.resetCollectionMetadata();
+        enemy.setCollectionMetadata(definition.id, definition.name, true);
+        enemy.setDifficultyScaling(pressure.normalHpMul * 2.1, pressure.normalSpeedMul * 1.15, 2.6, 3.2);
+        enemy.insert(this.objects);
+
+        const { minRadius, maxRadius } = this.getRegularSpawnRadiusRange();
+        this.getSpawnPosition(tempPos, minRadius, maxRadius);
+        enemy.setPosition(tempPos);
+        enemy.init();
+
+        this._rareSpawnMissStreak = 0;
+        console.log(`[Collection] 稀有敌人出现：${definition.name}`);
+    }
+
     createEnemy(x: number, y: number) {
 
         let enemy: Enemy = null;
@@ -1175,6 +1319,7 @@ export class BulletHell extends Component {
         }
 
         enemy.setBossMode(false);
+        this.applyCollectionMetadataForRegularEnemy(enemy, enemy instanceof Ghost ? EnemyKind.Ghost : EnemyKind.SnailTail);
 
         enemy.insert(this.objects);
 
@@ -1194,6 +1339,11 @@ export class BulletHell extends Component {
         if (elite && elite.enabled && this._stageElapsedTime >= this._nextEliteSpawnTime) {
             this.spawnEliteEnemy();
             this._nextEliteSpawnTime = this._stageElapsedTime + Math.max(1.5, elite.intervalSec * (0.85 + Math.random() * 0.3));
+        }
+
+        if (this.rareSpawnEnabled && !this._isGameCleared && !this._bossFightActive && this._stageElapsedTime >= this._nextRareSpawnTime) {
+            this.trySpawnRareCollectionEnemy();
+            this.scheduleNextRareSpawn();
         }
 
         const relief = table?.relief;

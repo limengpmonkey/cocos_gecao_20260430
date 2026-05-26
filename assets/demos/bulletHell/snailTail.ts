@@ -30,9 +30,7 @@ export class SnailTail extends Enemy {
 
 
     protected playDeathEffect(attackerNode?: Node, onComplete?: () => void): void {
-        if (onComplete) {
-            onComplete();
-        }
+        super.playDeathEffect(attackerNode, onComplete);
     }
 
     protected recycle(): void {

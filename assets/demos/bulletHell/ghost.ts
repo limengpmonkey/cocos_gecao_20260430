@@ -30,14 +30,7 @@ export class Ghost extends Enemy {
     
     /** 重写死亡效果播放（鬼魂特有特效） */
     protected playDeathEffect(attackerNode?: Node, onComplete?: () => void): void {
-        // 播放鬼魂死亡特效
-        // console.log(`${this.node.name} 播放鬼魂死亡特效...`);
-        
-        // 淡出动画
-        this.scheduleOnce(() => {
-            // 淡出完成后调用父类回调
-            if (onComplete) onComplete();
-        }, 1.0); // 1秒后完成
+        super.playDeathEffect(attackerNode, onComplete);
     }
     
     /** 重写回收方法（调用Ghost的对象池） */

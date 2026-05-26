@@ -155,11 +155,11 @@
     "playOnLoad": true,
     "_clips": [
       {
-        "__uuid__": "61aef636-8be0-4c61-9509-f956f5bf28d6",
+        "__uuid__": "d6770922-276e-4ee7-8c67-8a9da9301c2c",
         "__expectedType__": "cc.AnimationClip"
       },
       {
-        "__uuid__": "d6770922-276e-4ee7-8c67-8a9da9301c2c",
+        "__uuid__": "eeabe1e7-ed77-45e6-ace0-2fd720f67adc",
         "__expectedType__": "cc.AnimationClip"
       }
     ],
@@ -213,6 +213,8 @@
     "bossMoveSpeedMultiplier": 0.55,
     "bossChaseSlowdownDistance": 120,
     "bossDamageTakenMultiplier": 0.65,
+    "deathAnimationName": "death",
+    "deathAnimationFallbackDuration": 0.5,
     "_id": ""
   },
   {

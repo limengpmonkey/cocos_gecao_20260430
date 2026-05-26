@@ -1,5 +1,5 @@
 // Enemy.ts - 修复版，直接添加状态控制
-import { _decorator, instantiate, PhysicsSystem, Prefab, Quat, Vec3, CCInteger, Node, Sprite, Color, EventTarget, tween } from 'cc';
+import { _decorator, Animation, instantiate, PhysicsSystem, Prefab, Quat, Vec3, CCInteger, Node, Sprite, Color, EventTarget, tween } from 'cc';
 import { cBody } from '../../collision/Body';
 import { cObject, Trigger } from '../../collision/Object';
 import { BulletHell } from './bulletHell';
@@ -20,6 +20,9 @@ const tempDeathTargetPos = new Vec3();
 export interface EnemyKilledEventData {
     enemyNode: Node;
     enemyType: string;
+    collectionKey: string;
+    collectionDisplayName: string;
+    isRare: boolean;
     exp: number;
     score: number;
     isBoss: boolean;
@@ -74,6 +77,12 @@ export class Enemy extends cObject {
     @property({ tooltip: "Boss 受到伤害倍率（<1 更难击败）" })
     bossDamageTakenMultiplier: number = 0.65;
 
+    @property({ tooltip: '普通小怪死亡时播放的 Animation 状态名；为空时尝试播放默认状态' })
+    deathAnimationName: string = 'death';
+
+    @property({ tooltip: '死亡动画兜底回收延迟（秒）' })
+    deathAnimationFallbackDuration: number = 0.5;
+
     /** 当前血量（私有，通过只读属性暴露） */
     private _currentHp: number = 0;
     get currentHp(): number { return this._currentHp; }
@@ -123,9 +132,14 @@ export class Enemy extends cObject {
     private _pendingSuctionDeathDuration: number = 0;
     private _hasPendingSuctionDeath: boolean = false;
     private _pendingSuctionDeathWorldTarget: Vec3 = new Vec3();
+    private _collectionKey: string = '';
+    private _collectionDisplayName: string = '';
+    private _isRareCollectionTarget: boolean = false;
 
     get isBoss(): boolean { return this._isBoss; }
     get isElite(): boolean { return this._isElite; }
+    get collectionKey(): string { return this._collectionKey; }
+    get isRareCollectionTarget(): boolean { return this._isRareCollectionTarget; }
     
     onLoad(): void {
         // 调用父类的 onLoad
@@ -272,6 +286,10 @@ export class Enemy extends cObject {
             this.maxHp = this._baseMaxHp > 0 ? this._baseMaxHp : 20;
         }
 
+        if (!this._collectionKey) {
+            this.resetCollectionMetadata();
+        }
+
         this.applySpawnScaling();
         this._eliteSkillTimer = this._eliteSkillCooldown * (0.45 + Math.random() * 0.4);
         this._eliteDashTimer = 0;
@@ -289,6 +307,7 @@ export class Enemy extends cObject {
         this._pendingSuctionDeathWorldTarget.set(Vec3.ZERO);
         this._lastDamageTimeBySource = new WeakMap();
         this._lastDamageTimeNoSource = -9999;
+        this.resetReusableAnimationState();
         this.follow();//跟随速度和方向
         this.velocity.set(this.tryVelocity);
 
@@ -302,6 +321,40 @@ export class Enemy extends cObject {
         }, 0);
 
         this.applyVisualState();
+    }
+
+    private getReusableIdleAnimationName(animation: Animation): string {
+        const deathStateName = this.deathAnimationName.trim().toLowerCase();
+        const defaultName = animation.defaultClip?.name?.trim() || '';
+
+        if (defaultName && defaultName.toLowerCase() !== deathStateName) {
+            return defaultName;
+        }
+
+        for (const clip of animation.clips) {
+            const clipName = clip?.name?.trim() || '';
+            if (clipName && clipName.toLowerCase() !== deathStateName) {
+                return clipName;
+            }
+        }
+
+        return '';
+    }
+
+    private resetReusableAnimationState(): void {
+        const animation = this.getComponent(Animation) ?? this.getComponentInChildren(Animation);
+        if (!animation) {
+            return;
+        }
+
+        animation.stop();
+
+        const idleStateName = this.getReusableIdleAnimationName(animation);
+        if (!idleStateName) {
+            return;
+        }
+
+        animation.play(idleStateName);
     }
 
     private isPlayerAttack(attackerNode?: Node): boolean {
@@ -376,6 +429,18 @@ export class Enemy extends cObject {
         this._difficultySpeedMultiplier = Math.max(0.2, speedMultiplier || 1);
         this._difficultyExpMultiplier = Math.max(0.2, expMultiplier || 1);
         this._difficultyScoreMultiplier = Math.max(0.2, scoreMultiplier || 1);
+    }
+
+    setCollectionMetadata(collectionKey: string, displayName?: string, isRare: boolean = false): void {
+        this._collectionKey = (collectionKey || this.constructor.name).trim();
+        this._collectionDisplayName = (displayName || this.node?.name || this.constructor.name).trim();
+        this._isRareCollectionTarget = !!isRare;
+    }
+
+    resetCollectionMetadata(): void {
+        this._collectionKey = this.constructor.name;
+        this._collectionDisplayName = this.node?.name || this.constructor.name;
+        this._isRareCollectionTarget = false;
     }
 
     setEliteMode(
@@ -655,6 +720,9 @@ export class Enemy extends cObject {
         Enemy.emit(EnemyEvents.ON_KILLED, {
             enemyNode: this.node,
             enemyType: this.constructor.name,
+            collectionKey: this._collectionKey || this.constructor.name,
+            collectionDisplayName: this._collectionDisplayName || this.node.name || this.constructor.name,
+            isRare: this._isRareCollectionTarget,
             exp: this.expValue,
             score: this.scoreValue,
             isBoss: this._isBoss,
@@ -664,8 +732,6 @@ export class Enemy extends cObject {
         // 1. 停止所有移动和AI
         this.velocity.set(Vec3.ZERO);
         this.tryVelocity.set(Vec3.ZERO);
-        this.playDeathEffect(attackerNode);
-
         if (this._hasPendingSuctionDeath) {
             const parent = this.node.parent;
             if (parent) {
@@ -681,10 +747,9 @@ export class Enemy extends cObject {
             }
         }
 
-        // 3. 延迟回收（不依赖回调）
-        this.scheduleOnce(() => {
+        this.playDeathEffect(attackerNode, () => {
             this.recycle();
-        }, 0.1);
+        });
     }
     
     /** 
@@ -693,8 +758,41 @@ export class Enemy extends cObject {
      * @param onComplete 动画完成后的回调
      */
     protected playDeathEffect(attackerNode?: Node, onComplete?: () => void): void {
-        // 默认实现：立即完成
-        if (onComplete) onComplete();
+        if (this._isBoss) {
+            if (onComplete) onComplete();
+            return;
+        }
+
+        const animation = this.getComponent(Animation) ?? this.getComponentInChildren(Animation);
+        if (!animation) {
+            if (onComplete) onComplete();
+            return;
+        }
+
+        const stateName = this.deathAnimationName.trim() || animation.defaultClip?.name || animation.clips[0]?.name || '';
+        if (!stateName) {
+            if (onComplete) onComplete();
+            return;
+        }
+
+        const finish = () => {
+            animation.off(Animation.EventType.FINISHED, onAnimationFinished, this);
+            this.unschedule(onAnimationFallback);
+            if (onComplete) onComplete();
+        };
+
+        const onAnimationFinished = () => {
+            finish();
+        };
+
+        const onAnimationFallback = () => {
+            finish();
+        };
+
+        animation.off(Animation.EventType.FINISHED, onAnimationFinished, this);
+        animation.on(Animation.EventType.FINISHED, onAnimationFinished, this);
+        animation.play(stateName);
+        this.scheduleOnce(onAnimationFallback, Math.max(0.05, this.deathAnimationFallbackDuration));
     }
     
     /** 

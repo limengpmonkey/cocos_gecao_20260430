@@ -1740,7 +1740,7 @@
     "__type__": "SkillCardIconBinding",
     "skillId": "trash_bag_field",
     "defaultIcon": {
-      "__uuid__": "b4fda612-51c8-4316-bbf1-af1b1bb80863@f9941",
+      "__uuid__": "a37ff906-0c41-419a-b637-66d5cc440ed7@f9941",
       "__expectedType__": "cc.SpriteFrame"
     },
     "levelIcons": []
@@ -2739,6 +2739,13 @@
     "normalAttackIntervalMultiplier": 1.7,
     "normalAttackMinInterval": 0.45,
     "enableBalanceTable": true,
+    "rareSpawnEnabled": true,
+    "rareSpawnStartTime": 28,
+    "rareSpawnIntervalMin": 16,
+    "rareSpawnIntervalMax": 28,
+    "rareSpawnChance": 0.42,
+    "rareSpawnPityBonus": 0.12,
+    "rareMaxAlive": 1,
     "_id": ""
   },
   {
