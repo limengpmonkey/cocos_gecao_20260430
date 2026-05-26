@@ -99,10 +99,12 @@ export class Enemy extends cObject {
     private _baseScale: Vec3 = new Vec3(1, 1, 1);
     private _visualScale: Vec3 = new Vec3(1, 1, 1);
     private _baseSpriteColor: Color = new Color(255, 255, 255, 255);
+    private _visualSprites: Sprite[] = [];
+    private _baseSpriteColors: WeakMap<Sprite, Color> = new WeakMap();
     private _bossSpriteColor: Color = new Color(255, 180, 80, 255);
     private _eliteSpriteColor: Color = new Color(120, 240, 255, 255);
     private _bossEntranceFlashColor: Color = new Color(255, 255, 255, 255);
-    private readonly _hitFlashTintColor: Color = new Color(212, 224, 236, 255);
+    private readonly _hitFlashTintColor: Color = new Color(11, 150, 231, 255);
     
     // ✅ 新添加：游戏状态控制
     private _isGamePaused: boolean = false;
@@ -155,11 +157,7 @@ export class Enemy extends cObject {
         this._baseScoreValue = this.scoreValue;
         this._baseScale.set(this.node.scale);
         this._facingDirection = this._baseScale.x < 0 ? -1 : 1;
-
-        const sprite = this.node.getComponent(Sprite);
-        if (sprite) {
-            this._baseSpriteColor = sprite.color.clone();
-        }
+        this.cacheVisualSprites();
         
         // ✅ 监听游戏状态变化
         this.setupGameStateListener();
@@ -406,22 +404,64 @@ export class Enemy extends cObject {
         );
         this.node.setScale(this._visualScale);
 
-        const sprite = this.node.getComponent(Sprite);
-        if (!sprite) {
+        const sprites = this.getVisualSprites();
+        if (sprites.length === 0) {
             return;
         }
 
         if (this._isBoss && this._bossEntranceTimer > 0) {
-            sprite.color = this._bossEntranceFlashOn ? this._bossEntranceFlashColor : this._bossSpriteColor;
+            this.applyColorToSprites(this._bossEntranceFlashOn ? this._bossEntranceFlashColor : this._bossSpriteColor);
             return;
         }
 
         if (this._isBoss) {
-            sprite.color = this._bossSpriteColor;
+            this.applyColorToSprites(this._bossSpriteColor);
             return;
         }
 
-        sprite.color = this._isElite ? this._eliteSpriteColor : this._baseSpriteColor;
+        if (this._isElite) {
+            this.applyColorToSprites(this._eliteSpriteColor);
+            return;
+        }
+
+        for (const sprite of sprites) {
+            const baseColor = this._baseSpriteColors.get(sprite);
+            if (!baseColor) {
+                continue;
+            }
+
+            sprite.color = baseColor.clone();
+        }
+    }
+
+    private cacheVisualSprites(): void {
+        const sprites = this.node.getComponentsInChildren(Sprite);
+        this._visualSprites = sprites.filter(sprite => !!sprite && sprite.isValid);
+        this._baseSpriteColors = new WeakMap();
+
+        const primarySprite = this._visualSprites[0] ?? null;
+        if (primarySprite) {
+            this._baseSpriteColor = primarySprite.color.clone();
+        }
+
+        for (const sprite of this._visualSprites) {
+            this._baseSpriteColors.set(sprite, sprite.color.clone());
+        }
+    }
+
+    private getVisualSprites(): Sprite[] {
+        if (this._visualSprites.length === 0 || this._visualSprites.some(sprite => !sprite || !sprite.isValid)) {
+            this.cacheVisualSprites();
+        }
+
+        return this._visualSprites;
+    }
+
+    private applyColorToSprites(color: Color): void {
+        const sprites = this.getVisualSprites();
+        for (const sprite of sprites) {
+            sprite.color = new Color(color.r, color.g, color.b, sprite.color.a);
+        }
     }
 
     setDifficultyScaling(hpMultiplier: number, speedMultiplier: number, expMultiplier: number, scoreMultiplier: number): void {
@@ -813,7 +853,7 @@ export class Enemy extends cObject {
 
     /** 播放被击中特效（缩放+闪烁） */
     protected playHitEffect(): void {
-        const sprite = this.node.getComponent(Sprite) ?? this.node.getComponentInChildren(Sprite);
+        const sprites = this.getVisualSprites();
         const originalScale = this.node.scale.clone();
 
         // 缩放效果
@@ -826,20 +866,14 @@ export class Enemy extends cObject {
         }, 0.1);
 
         // 保留原来的“放大一下再恢复”，颜色改成更克制的浅灰蓝。
-        if (sprite) {
-            const originalColor = sprite.color.clone();
-            sprite.color = new Color(
-                this._hitFlashTintColor.r,
-                this._hitFlashTintColor.g,
-                this._hitFlashTintColor.b,
-                originalColor.a
-            );
+        if (sprites.length > 0) {
+            this.applyColorToSprites(this._hitFlashTintColor);
             this.scheduleOnce(() => {
-                if (!sprite || !sprite.isValid) {
+                if (!this.node || !this.node.isValid) {
                     return;
                 }
 
-                sprite.color = originalColor;
+                this.applyVisualState();
             }, 0.1);
         }
     }
