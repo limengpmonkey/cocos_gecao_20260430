@@ -31,10 +31,13 @@
       },
       {
         "__id__": 8
+      },
+      {
+        "__id__": 20
       }
     ],
     "_prefab": {
-      "__id__": 10
+      "__id__": 22
     },
     "_lpos": {
       "__type__": "cc.Vec3",
@@ -86,7 +89,7 @@
       "a": 255
     },
     "_spriteFrame": {
-      "__uuid__": "b8b065ca-6aad-4ba5-a149-1678e9296b97@f9941",
+      "__uuid__": "21ca9a4e-6e7f-4f91-964d-d7970c736a15@f9941",
       "__expectedType__": "cc.SpriteFrame"
     },
     "_type": 0,
@@ -142,7 +145,7 @@
     "node": {
       "__id__": 1
     },
-    "_enabled": false,
+    "_enabled": true,
     "__prefab": {
       "__id__": 7
     },
@@ -160,7 +163,7 @@
     "_size": {
       "__type__": "cc.Vec3",
       "x": 70,
-      "y": 80,
+      "y": 86.68,
       "z": 1
     },
     "_id": ""
@@ -170,7 +173,7 @@
     "fileId": "cfKgS6dJ1IBKmK3ELyMC/o"
   },
   {
-    "__type__": "a6edbJLuWBGk7VWehz3M+o2",
+    "__type__": "f29b1hkx41DBauPD3le/IAl",
     "_name": "",
     "_objFlags": 0,
     "node": {
@@ -181,31 +184,207 @@
       "__id__": 9
     },
     "trigger": true,
-    "group": 8,
+    "group": 1,
     "type": 1,
     "center": {
       "__type__": "cc.Vec3",
       "x": 0,
-      "y": 10,
+      "y": 0,
       "z": 0
     },
     "size": {
       "__type__": "cc.Vec3",
-      "x": 70,
-      "y": 80,
+      "x": 0,
+      "y": 0,
       "z": 0
     },
     "radius": 0,
     "points": [],
-    "agent": true,
+    "agent": false,
     "weight": 0.5,
-    "maxRadius": 35,
-    "maxVelocity": 200,
+    "maxRadius": 0,
+    "maxVelocity": 0,
+    "avoidSameGroupAgents": true,
+    "expValue": 10,
+    "scoreValue": 10,
+    "maxHp": 20,
+    "damageIntervalPerSource": 0.12,
+    "bossMoveSpeedMultiplier": 0.55,
+    "bossChaseSlowdownDistance": 120,
+    "bossDamageTakenMultiplier": 0.65,
+    "deathAnimationName": "death",
+    "deathAnimationFallbackDuration": 0.5,
+    "metaConfig": {
+      "__id__": 10
+    },
+    "combatConfig": {
+      "__id__": 11
+    },
+    "movementConfig": {
+      "__id__": 12
+    },
+    "dashConfig": {
+      "__id__": 13
+    },
+    "meteorConfig": {
+      "__id__": 14
+    },
+    "novaConfig": {
+      "__id__": 15
+    },
+    "animationConfig": {
+      "__id__": 16
+    },
+    "meteorImpactEffectClip": null,
+    "meteorImpactEffectFirstFrame": null,
+    "meteorImpactEffectScale": 1,
+    "meteorImpactEffectPlaybackSpeed": 0.45,
+    "meteorImpactEffectLingerDuration": 0.18,
+    "phaseOneConfig": {
+      "__id__": 17
+    },
+    "phaseTwoConfig": {
+      "__id__": 18
+    },
+    "phaseThreeConfig": {
+      "__id__": 19
+    },
     "_id": ""
   },
   {
     "__type__": "cc.CompPrefabInfo",
-    "fileId": "c4+27l+R9CDYmJ0Kw9jvPF"
+    "fileId": "94/b8yTwdOjZISIzvXoYFA"
+  },
+  {
+    "__type__": "BossMetaConfig",
+    "collectionId": "ghost_boss",
+    "displayName": "brooooooooom"
+  },
+  {
+    "__type__": "BossCombatConfig",
+    "attackIntervalBase": 1.65,
+    "attackRecoverDuration": 0.42
+  },
+  {
+    "__type__": "BossMovementConfig",
+    "idlePreferredDistance": 250,
+    "idleStrafeAmplitude": 110,
+    "targetPredictionFactor": 0.28
+  },
+  {
+    "__type__": "BossDashConfig",
+    "enabled": false,
+    "telegraphDuration": 0.82,
+    "duration": 0.28,
+    "speed": 760,
+    "hitRadius": 54,
+    "damage": 16
+  },
+  {
+    "__type__": "BossMeteorConfig",
+    "telegraphDuration": 0.95,
+    "radius": 82,
+    "damage": 14,
+    "spreadMultiplier": 1.2
+  },
+  {
+    "__type__": "BossNovaConfig",
+    "telegraphDuration": 0.74,
+    "radius": 220,
+    "damage": 18
+  },
+  {
+    "__type__": "BossAnimationConfig",
+    "rageLoopClip": "baonu",
+    "idleToAngryClip": "idle_to_angry",
+    "idleToWalkClip": "idle_to_walking",
+    "preAttackClip1": "pre_attack_1",
+    "preAttackClip2": "pre_attack_2",
+    "walkLoopClip": "tank_walking",
+    "walkToIdleClip": "walking_to_idle",
+    "movingSpeedSqrThreshold": 16,
+    "openingShowcaseDuration": 3,
+    "dashWalkVisibleDuration": 0.42
+  },
+  {
+    "__type__": "BossPhaseProfile",
+    "threshold": 1,
+    "speedMultiplier": 1,
+    "cooldownMultiplier": 1,
+    "dashWeight": 0.62,
+    "meteorWeight": 0.38,
+    "novaWeight": 0
+  },
+  {
+    "__type__": "BossPhaseProfile",
+    "threshold": 0.68,
+    "speedMultiplier": 1.1,
+    "cooldownMultiplier": 0.82,
+    "dashWeight": 0.38,
+    "meteorWeight": 0.36,
+    "novaWeight": 0.26
+  },
+  {
+    "__type__": "BossPhaseProfile",
+    "threshold": 0.34,
+    "speedMultiplier": 1.22,
+    "cooldownMultiplier": 0.64,
+    "dashWeight": 0.33,
+    "meteorWeight": 0.33,
+    "novaWeight": 0.34
+  },
+  {
+    "__type__": "cc.Animation",
+    "_name": "",
+    "_objFlags": 0,
+    "node": {
+      "__id__": 1
+    },
+    "_enabled": true,
+    "__prefab": {
+      "__id__": 21
+    },
+    "playOnLoad": false,
+    "_clips": [
+      {
+        "__uuid__": "e982206f-bef4-4844-b1df-381e87a8c135",
+        "__expectedType__": "cc.AnimationClip"
+      },
+      {
+        "__uuid__": "d204f185-3c8d-4eef-bd9e-44c1da3624b1",
+        "__expectedType__": "cc.AnimationClip"
+      },
+      {
+        "__uuid__": "b69e577d-73cb-4ce5-aa2b-65d044670c54",
+        "__expectedType__": "cc.AnimationClip"
+      },
+      {
+        "__uuid__": "2f230577-60f9-4bee-a822-0c8505fc1133",
+        "__expectedType__": "cc.AnimationClip"
+      },
+      {
+        "__uuid__": "1659a3f9-0ecb-4d91-9e81-7cf3bda9443e",
+        "__expectedType__": "cc.AnimationClip"
+      },
+      {
+        "__uuid__": "1807324c-f56a-40fd-8c0d-90065c4217a4",
+        "__expectedType__": "cc.AnimationClip"
+      },
+      {
+        "__uuid__": "ac49a9be-3501-4b43-9005-9a0432586dc6",
+        "__expectedType__": "cc.AnimationClip"
+      },
+      {
+        "__uuid__": "ca92af5a-3e55-4524-adca-282ccbaeeec1",
+        "__expectedType__": "cc.AnimationClip"
+      }
+    ],
+    "_defaultClip": null,
+    "_id": ""
+  },
+  {
+    "__type__": "cc.CompPrefabInfo",
+    "fileId": "02os48SxhCnIf4/9DFDdTs"
   },
   {
     "__type__": "cc.PrefabInfo",

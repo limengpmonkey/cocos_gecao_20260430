@@ -1,4 +1,4 @@
-import { Input, Prefab, Quat, Vec3, _decorator, CCInteger, PhysicsSystem, EventTarget, Component, Node, Renderer } from 'cc';
+import { Input, Prefab, Quat, Vec3, _decorator, CCInteger, PhysicsSystem, EventTarget, Component, Node, Renderer, Sprite, Color } from 'cc';
 import { cBody } from '../../collision/Body';
 import { Trigger, cObject } from '../../collision/Object';
 import { BulletHell } from './bulletHell';
@@ -38,8 +38,11 @@ export class Player extends cObject {
         return this._inst;
     }
     private _renderers: Renderer[] = [];
+    private _visualSprites: Sprite[] = [];
+    private _baseSpriteColors: WeakMap<Sprite, Color> = new WeakMap();
     private _invincibleTimerCallback: () => void = null;
     private _invincibleBlinkCallback: () => void = null;
+    private _hitFlashRestoreCallback: () => void = null;
     ENEMYGROUP = PhysicsSystem.PhysicsGroup["enemy"];
     // ================== 血量相关属性 ==================
     /** 最大血量 */
@@ -79,6 +82,9 @@ export class Player extends cObject {
 
     guns: Array<Gun> = [];
     velocity: Vec3 = new Vec3();
+    private _knockbackVelocity: Vec3 = new Vec3();
+    private _knockbackTimer: number = 0;
+    private _knockbackSustainTimer: number = 0;
 
     /** 技能管理 */
     skillManager: SkillManager = null;
@@ -99,6 +105,7 @@ export class Player extends cObject {
         super.onLoad();
         Player._inst = this;
         this._renderers = this.node.getComponentsInChildren(Renderer);
+        this.cacheVisualSprites();
         // 初始化血量
         this._currentHp = this.maxHp;
         this._state = PlayerState.ALIVE;
@@ -140,6 +147,9 @@ export class Player extends cObject {
         // 如果玩家死亡，不执行移动逻辑
         if (this._state === PlayerState.DEAD) {
             this.velocity.set(Vec3.ZERO);
+            this._knockbackVelocity.set(Vec3.ZERO);
+            this._knockbackTimer = 0;
+            this._knockbackSustainTimer = 0;
             return;
         }
 
@@ -156,15 +166,45 @@ export class Player extends cObject {
         
         // 计算新位置
         let pos = this.getPosition();
-        let velocity = this.velocity;
+        tempPos.set(this.velocity);
 
-        tempPos.x = pos.x + velocity.x * dt;
-        tempPos.y = pos.y + velocity.y * dt;
-        tempPos.z = pos.z + velocity.z * dt;
+        if (this._knockbackTimer > 0) {
+            this._knockbackTimer = Math.max(0, this._knockbackTimer - dt);
+            tempPos.add(this._knockbackVelocity);
+            if (this._knockbackSustainTimer > 0) {
+                this._knockbackSustainTimer = Math.max(0, this._knockbackSustainTimer - dt);
+            } else {
+                this._knockbackVelocity.multiplyScalar(0.92);
+            }
+            if (this._knockbackTimer <= 0) {
+                this._knockbackVelocity.set(Vec3.ZERO);
+                this._knockbackSustainTimer = 0;
+            }
+        }
+
+        tempPos.x = pos.x + tempPos.x * dt;
+        tempPos.y = pos.y + tempPos.y * dt;
+        tempPos.z = pos.z + tempPos.z * dt;
 
         BulletHell.inst?.clampPositionToBossArena(tempPos);
 
         this.setPosition(tempPos);
+    }
+
+    applyKnockback(dir: Vec3, strength: number, duration: number = 0.12, sustainDuration: number = 0): void {
+        if (!this.isAlive) {
+            return;
+        }
+
+        const knockDirection = dir.clone();
+        if (knockDirection.lengthSqr() <= 0.0001) {
+            knockDirection.set(1, -1, 0);
+        }
+
+        knockDirection.normalize();
+        this._knockbackVelocity.set(knockDirection).multiplyScalar(Math.max(0, strength));
+        this._knockbackTimer = Math.max(0, duration);
+        this._knockbackSustainTimer = Math.min(this._knockbackTimer, Math.max(0, sustainDuration));
     }
 
     // ================== 血量核心方法 ==================
@@ -276,6 +316,9 @@ export class Player extends cObject {
         
         // 停止所有移动
         this.velocity.set(Vec3.ZERO);
+        this._knockbackVelocity.set(Vec3.ZERO);
+        this._knockbackTimer = 0;
+        this._knockbackSustainTimer = 0;
         
         // 禁用所有枪械
         this.disableAllGuns();
@@ -357,11 +400,52 @@ export class Player extends cObject {
     }
     
     // ================== 特效方法（需实现） ==================
+
+    private cacheVisualSprites(): void {
+        this._visualSprites = this.node.getComponentsInChildren(Sprite);
+        this._baseSpriteColors = new WeakMap();
+        for (const sprite of this._visualSprites) {
+            if (!sprite) {
+                continue;
+            }
+            this._baseSpriteColors.set(sprite, sprite.color.clone());
+        }
+    }
+
+    private restoreVisualSpriteColors(): void {
+        for (const sprite of this._visualSprites) {
+            const baseColor = this._baseSpriteColors.get(sprite);
+            if (!sprite || !baseColor) {
+                continue;
+            }
+            sprite.color = baseColor.clone();
+        }
+    }
     
     /** 播放受伤特效 */
     private playHitEffect(): void {
-        // 实现：屏幕闪烁、红色闪屏、受伤音效等
-        console.log("播放受伤特效");
+        if (this._visualSprites.length <= 0) {
+            this.cacheVisualSprites();
+        }
+
+        if (this._hitFlashRestoreCallback) {
+            this.unschedule(this._hitFlashRestoreCallback);
+            this._hitFlashRestoreCallback = null;
+        }
+
+        for (const sprite of this._visualSprites) {
+            const baseColor = this._baseSpriteColors.get(sprite);
+            if (!sprite || !baseColor) {
+                continue;
+            }
+            sprite.color = new Color(255, Math.max(0, baseColor.g * 0.35), Math.max(0, baseColor.b * 0.35), baseColor.a);
+        }
+
+        this._hitFlashRestoreCallback = () => {
+            this.restoreVisualSpriteColors();
+            this._hitFlashRestoreCallback = null;
+        };
+        this.scheduleOnce(this._hitFlashRestoreCallback, 0.1);
     }
     
     /** 播放治疗特效 */
@@ -417,6 +501,8 @@ export class Player extends cObject {
         for (const r of this._renderers) {
             r.enabled = true;
         }
+
+        this.restoreVisualSpriteColors();
     }
     
     // ================== 枪械控制 ==================
@@ -574,11 +660,7 @@ export class Player extends cObject {
         
         switch (b.group) {
             case this.ENEMYGROUP:
-                // 碰到敌人，按冷却频率受伤，避免重叠时瞬间掉光血
-                if (this._contactDamageCooldownLeft <= 0) {
-                    this.takeDamage(10, b.object?.node);
-                    this._contactDamageCooldownLeft = Math.max(0.05, this.contactDamageCooldown);
-                }
+                // 玩家身体与敌人本体接触时不再直接受伤。
                 break;
                 
             // case BULLET_GROUP:

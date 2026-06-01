@@ -3,6 +3,7 @@ import { cCollider } from '../../collision/Collider';
 import { cObject } from '../../collision/Object';
 import { Joystick } from '../../Joystick/Joystick';
 import { Bullet } from './bullet';
+import { BossEnemy } from './BossEnemy';
 import { Enemy, EnemyEvents, EnemyKilledEventData } from './enemy';
 import { ExperienceSystem } from './ExperienceSystem';
 import { Ghost } from './ghost';
@@ -18,6 +19,7 @@ const { ccclass, property } = _decorator;
 
 const tempPos = new Vec3();
 const tempRot = new Quat();
+const tempCameraShakeOffset = new Vec3();
 
 enum EnemyKind {
     Ghost = 0,
@@ -70,11 +72,8 @@ class StageConfig {
     @property({ tooltip: '本关敌人出生最大半径（<=0 回退全局 maxSpawnRadius）' })
     maxSpawnRadius: number = 0;
 
-    @property({ type: Prefab, tooltip: '本关 Boss 预制体（为空则不生成 Boss）' })
+    @property({ type: Prefab, tooltip: '本关 Boss 预制体（需挂载 BossEnemy，为空则不生成 Boss）' })
     bossPrefab: Prefab = null;
-
-    @property({ type: Enum(EnemyKind), tooltip: '本关 Boss 类型（决定对象池与行为）' })
-    bossKind: EnemyKind = EnemyKind.Ghost;
 
     @property({ tooltip: '满足分数后延迟多少秒生成 Boss（<=0 立即）' })
     bossSpawnDelay: number = 1;
@@ -164,11 +163,11 @@ export class BulletHell extends Component {
     @property({ group: 'Enemy Config', tooltip: '近距离刷怪最大半径（建议不超过一屏半）' })
     mobileNearSpawnMaxRadius: number = 560;
 
-    @property({ type: Prefab, group: 'Boss Config', tooltip: 'Boss 预制体（可复用已有敌人预制体）' })
+    @property({ type: Prefab, group: 'Boss Config', tooltip: 'Boss 预制体（需挂载 BossEnemy）' })
     bossPrefab: Prefab = null;
 
-    @property({ type: Enum(EnemyKind), group: 'Boss Config', tooltip: 'Boss 类型（决定对象池与行为）' })
-    bossKind: EnemyKind = EnemyKind.Ghost;
+    @property({ group: 'Boss Config', tooltip: '调试：开局直接进入当前关 Boss 战，忽略分数条件' })
+    debugStartWithBossFight: boolean = false;
 
     @property({ group: 'Boss Config', tooltip: '满足条件后延迟多少秒生成 Boss' })
     bossSpawnDelay: number = 1;
@@ -259,6 +258,9 @@ export class BulletHell extends Component {
     private _bossFightActive = false;
     private _bossArenaCenter = new Vec3();
     private _bossIntroCameraLockTime = 0;
+    private _cameraShakeTimer = 0;
+    private _cameraShakeDuration = 0;
+    private _cameraShakeStrength = 0;
     private _bossIntroAttackLockTime = 0;
     private _bossIntroGunsLocked = false;
     private _bossArenaHintNode: Node = null;
@@ -286,6 +288,7 @@ export class BulletHell extends Component {
         Enemy.off(EnemyEvents.ON_KILLED, this.onEnemyKilled, this);
 
         cCollider.inst.clear();
+        BossEnemy.clearPools();
         Ghost.pools.length = 0;
         Skill.pools = new WeakMap();
         Bullet.pools.length = 0;
@@ -340,6 +343,12 @@ export class BulletHell extends Component {
             }
         }
 
+        if (this.debugStartWithBossFight) {
+            this.scheduleOnce(() => {
+                this.forceEnterCurrentStageBossFight();
+            }, 0);
+        }
+
         //定时刷怪
         this.schedule(() => {
             this.trySpawnRegularEnemy();
@@ -370,8 +379,7 @@ export class BulletHell extends Component {
         stage.maxEnemies = Math.max(20, this.max);
         stage.minSpawnRadius = this.minSpawnRadius;
         stage.maxSpawnRadius = this.maxSpawnRadius;
-        stage.bossPrefab = this.bossPrefab || this.ghost;
-        stage.bossKind = this.bossPrefab ? this.bossKind : EnemyKind.Ghost;
+        stage.bossPrefab = this.bossPrefab;
         stage.bossSpawnDelay = Math.max(0.5, this.bossSpawnDelay);
         stage.bossEntranceBufferTime = Math.max(0.8, this.bossEntranceBufferTime);
         stage.bossArenaWidth = Math.max(640, this.bossArenaWidth);
@@ -391,8 +399,7 @@ export class BulletHell extends Component {
         stage.maxEnemies = Math.max(30, Math.floor((base?.maxEnemies || this.max) * 1.25));
         stage.minSpawnRadius = base?.minSpawnRadius || this.minSpawnRadius;
         stage.maxSpawnRadius = base?.maxSpawnRadius || this.maxSpawnRadius;
-        stage.bossPrefab = base?.bossPrefab || this.bossPrefab || this.snailTail || this.ghost;
-        stage.bossKind = base?.bossKind ?? (stage.bossPrefab === this.snailTail ? EnemyKind.SnailTail : EnemyKind.Ghost);
+        stage.bossPrefab = base?.bossPrefab || this.bossPrefab;
         stage.bossSpawnDelay = Math.max(0.5, base?.bossSpawnDelay ?? this.bossSpawnDelay);
         stage.bossEntranceBufferTime = Math.max(1, base?.bossEntranceBufferTime ?? this.bossEntranceBufferTime);
         stage.bossArenaWidth = Math.max(760, base?.bossArenaWidth ?? this.bossArenaWidth);
@@ -555,6 +562,31 @@ export class BulletHell extends Component {
         }, delay);
     }
 
+    public forceEnterCurrentStageBossFight(): void {
+        if (this._isGameCleared || this._bossAlive || this._bossSpawned || this._bossSpawnQueued) {
+            return;
+        }
+
+        const stage = this.getCurrentStage();
+        const bossPrefab = stage?.bossPrefab ?? this.bossPrefab;
+        if (!bossPrefab) {
+            console.warn('[BulletHell] 无法直接进入 Boss 战：当前关未配置 Boss Prefab');
+            return;
+        }
+
+        this.clearActiveEnemiesForBossPhase();
+        this._bossSpawnQueued = false;
+        this._bossSpawned = false;
+        this._bossAlive = false;
+
+        const targetScore = Math.max(0, stage?.scoreToSummonBoss ?? 0);
+        if (targetScore > 0) {
+            this._stageScore = Math.max(this._stageScore, targetScore);
+        }
+
+        this.spawnBoss();
+    }
+
     private spawnBoss(): void {
         if (!this.objects) {
             return;
@@ -562,7 +594,6 @@ export class BulletHell extends Component {
 
         const stage = this.getCurrentStage();
         const bossPrefab = stage?.bossPrefab ?? this.bossPrefab;
-        const bossKind = stage?.bossKind ?? this.bossKind;
         const hpMultiplier = stage?.bossHpMultiplier ?? this.bossHpMultiplier;
         const expMultiplier = stage?.bossExpMultiplier ?? this.bossExpMultiplier;
         const scoreMultiplier = stage?.bossScoreMultiplier ?? this.bossScoreMultiplier;
@@ -572,14 +603,15 @@ export class BulletHell extends Component {
             return;
         }
 
-        const enemy = this.getEnemyFromPrefab(bossKind, bossPrefab);
-        if (!enemy) {
+        const boss = BossEnemy.get(bossPrefab);
+        if (!boss) {
+            console.error('[BulletHell] Boss prefab missing BossEnemy component or failed to instantiate.');
             return;
         }
 
-        enemy.setBossMode(true, hpMultiplier, expMultiplier, scoreMultiplier);
-        this.applyCollectionMetadataForBoss(enemy, bossKind);
-        enemy.insert(this.objects);
+        boss.setBossMode(true, hpMultiplier, expMultiplier, scoreMultiplier);
+    boss.applyBossCollectionMetadata();
+        boss.insert(this.objects);
 
         // 斗兽场开场：以 Boss 出现点作为战场中心，避免与玩家重叠并强调关底仪式感。
         if (Player.inst) {
@@ -589,9 +621,9 @@ export class BulletHell extends Component {
         }
 
         this.activateBossArena(tempPos);
-        enemy.setPosition(tempPos);
-        enemy.init();
-        enemy.beginBossEntranceBuffer(entranceBufferTime);
+        boss.setPosition(tempPos);
+        boss.init();
+        boss.beginBossEntranceBuffer(entranceBufferTime);
 
         this.placePlayerAtArenaStart();
         this._bossIntroCameraLockTime = Math.max(this._bossIntroCameraLockTime, entranceBufferTime + 0.1);
@@ -1051,16 +1083,19 @@ export class BulletHell extends Component {
             return;
         }
 
-        const shouldShow = this._bossFightActive && this._bossIntroCameraLockTime > 0;
+        const shouldShow = this._bossFightActive;
         this._bossArenaHintNode.active = shouldShow;
         if (!shouldShow) {
             this._bossArenaHintGraphics.clear();
             return;
         }
 
-        this._bossArenaHintFlashTime += dt;
-        const wave = 0.5 + 0.5 * Math.sin(this._bossArenaHintFlashTime * 14);
-        const alpha = 120 + Math.floor(wave * 120);
+        let alpha = 220;
+        if (this._bossIntroCameraLockTime > 0) {
+            this._bossArenaHintFlashTime += dt;
+            const wave = 0.5 + 0.5 * Math.sin(this._bossArenaHintFlashTime * 14);
+            alpha = 120 + Math.floor(wave * 120);
+        }
 
         this._bossArenaHintNode.setPosition(this._bossArenaCenter);
 
@@ -1103,6 +1138,43 @@ export class BulletHell extends Component {
 
         position.x = Math.max(this._bossArenaCenter.x - halfWidth, Math.min(this._bossArenaCenter.x + halfWidth, position.x));
         position.y = Math.max(this._bossArenaCenter.y - halfHeight, Math.min(this._bossArenaCenter.y + halfHeight, position.y));
+    }
+
+    public projectBossArenaEdgePoint(origin: Vec3, direction: Vec3, out: Vec3): void {
+        out.set(origin);
+        if (!this._bossFightActive || direction.lengthSqr() <= 0.0001) {
+            this.clampPositionToBossArena(out);
+            return;
+        }
+
+        const halfWidth = this.getCurrentBossArenaWidth() * 0.5;
+        const halfHeight = this.getCurrentBossArenaHeight() * 0.5;
+        const minX = this._bossArenaCenter.x - halfWidth;
+        const maxX = this._bossArenaCenter.x + halfWidth;
+        const minY = this._bossArenaCenter.y - halfHeight;
+        const maxY = this._bossArenaCenter.y + halfHeight;
+
+        let travel = Number.POSITIVE_INFINITY;
+        if (Math.abs(direction.x) > 0.0001) {
+            const targetX = direction.x > 0 ? maxX : minX;
+            travel = Math.min(travel, (targetX - origin.x) / direction.x);
+        }
+        if (Math.abs(direction.y) > 0.0001) {
+            const targetY = direction.y > 0 ? maxY : minY;
+            travel = Math.min(travel, (targetY - origin.y) / direction.y);
+        }
+
+        if (!Number.isFinite(travel) || travel < 0) {
+            this.clampPositionToBossArena(out);
+            return;
+        }
+
+        out.set(
+            origin.x + direction.x * travel,
+            origin.y + direction.y * travel,
+            origin.z,
+        );
+        this.clampPositionToBossArena(out);
     }
 
     private clearActiveEnemiesForBossPhase(): void {
@@ -1198,20 +1270,8 @@ export class BulletHell extends Component {
         return kind === EnemyKind.SnailTail ? 'snail_tail' : 'ghost';
     }
 
-    private getCollectionIdForBossKind(kind: EnemyKind): string {
-        return kind === EnemyKind.SnailTail ? 'snail_tail_boss' : 'ghost_boss';
-    }
-
     private applyCollectionMetadataForRegularEnemy(enemy: Enemy, kind: EnemyKind): void {
         const definition = CollectionSystem.getDefinition(this.getCollectionIdForRegularKind(kind));
-        enemy.resetCollectionMetadata();
-        if (definition) {
-            enemy.setCollectionMetadata(definition.id, definition.name, false);
-        }
-    }
-
-    private applyCollectionMetadataForBoss(enemy: Enemy, kind: EnemyKind): void {
-        const definition = CollectionSystem.getDefinition(this.getCollectionIdForBossKind(kind));
         enemy.resetCollectionMetadata();
         if (definition) {
             enemy.setCollectionMetadata(definition.id, definition.name, false);
@@ -1379,6 +1439,20 @@ export class BulletHell extends Component {
         this.updateBossArenaHint(dt);
 
         Vec3.lerp(tempPos, this.camera.position, cameraTarget, 0.25);
+
+        if (this._cameraShakeTimer > 0) {
+            this._cameraShakeTimer = Math.max(0, this._cameraShakeTimer - dt);
+            const intensity = this._cameraShakeDuration > 0
+                ? this._cameraShakeStrength * (this._cameraShakeTimer / this._cameraShakeDuration)
+                : this._cameraShakeStrength;
+            tempCameraShakeOffset.set(
+                (Math.random() * 2 - 1) * intensity,
+                (Math.random() * 2 - 1) * intensity,
+                0,
+            );
+            tempPos.add(tempCameraShakeOffset);
+        }
+
         this.camera.position = tempPos;
 
         //背景跟随
@@ -1389,6 +1463,12 @@ export class BulletHell extends Component {
         material.setProperty("tilingOffset", uvOffset);
         bg.position = cameraTarget;
 
+    }
+
+    triggerCameraShake(strength: number = 12, duration: number = 0.14): void {
+        this._cameraShakeStrength = Math.max(this._cameraShakeStrength, Math.max(0, strength));
+        this._cameraShakeDuration = Math.max(this._cameraShakeDuration, Math.max(0.01, duration));
+        this._cameraShakeTimer = Math.max(this._cameraShakeTimer, this._cameraShakeDuration);
     }
 
 }

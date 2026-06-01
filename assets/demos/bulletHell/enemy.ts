@@ -37,7 +37,7 @@ export enum EnemyEvents {
 export class Enemy extends cObject {
     private static _events = new EventTarget();
     static normalVisualScaleMultiplier = 0.72;
-    static bossVisualScaleMultiplier = 1.18;
+    static bossVisualScaleMultiplier = 2 / 3;
 
     static on(event: EnemyEvents, callback: (...args: any[]) => void, target?: any): void {
         this._events.on(event, callback, target);
@@ -101,7 +101,6 @@ export class Enemy extends cObject {
     private _baseSpriteColor: Color = new Color(255, 255, 255, 255);
     private _visualSprites: Sprite[] = [];
     private _baseSpriteColors: WeakMap<Sprite, Color> = new WeakMap();
-    private _bossSpriteColor: Color = new Color(255, 180, 80, 255);
     private _eliteSpriteColor: Color = new Color(120, 240, 255, 255);
     private _bossEntranceFlashColor: Color = new Color(255, 255, 255, 255);
     private readonly _hitFlashTintColor: Color = new Color(11, 150, 231, 255);
@@ -142,6 +141,17 @@ export class Enemy extends cObject {
     get isElite(): boolean { return this._isElite; }
     get collectionKey(): string { return this._collectionKey; }
     get isRareCollectionTarget(): boolean { return this._isRareCollectionTarget; }
+    get isBossEntranceActive(): boolean { return this._bossEntranceTimer > 0; }
+    get isGamePausedState(): boolean { return this._isGamePaused; }
+    get isDyingState(): boolean { return this._isDying; }
+
+    protected syncFacingByVelocity(velocityX: number): void {
+        const desiredFacing = velocityX < 0 ? -1 : 1;
+        if (desiredFacing !== this._facingDirection) {
+            this._facingDirection = desiredFacing;
+            this.applyVisualState();
+        }
+    }
     
     onLoad(): void {
         // 调用父类的 onLoad
@@ -410,12 +420,16 @@ export class Enemy extends cObject {
         }
 
         if (this._isBoss && this._bossEntranceTimer > 0) {
-            this.applyColorToSprites(this._bossEntranceFlashOn ? this._bossEntranceFlashColor : this._bossSpriteColor);
+            if (this._bossEntranceFlashOn) {
+                this.applyColorToSprites(this._bossEntranceFlashColor);
+            } else {
+                this.restoreBaseSpriteColors(sprites);
+            }
             return;
         }
 
         if (this._isBoss) {
-            this.applyColorToSprites(this._bossSpriteColor);
+            this.restoreBaseSpriteColors(sprites);
             return;
         }
 
@@ -424,14 +438,7 @@ export class Enemy extends cObject {
             return;
         }
 
-        for (const sprite of sprites) {
-            const baseColor = this._baseSpriteColors.get(sprite);
-            if (!baseColor) {
-                continue;
-            }
-
-            sprite.color = baseColor.clone();
-        }
+        this.restoreBaseSpriteColors(sprites);
     }
 
     private cacheVisualSprites(): void {
@@ -461,6 +468,17 @@ export class Enemy extends cObject {
         const sprites = this.getVisualSprites();
         for (const sprite of sprites) {
             sprite.color = new Color(color.r, color.g, color.b, sprite.color.a);
+        }
+    }
+
+    private restoreBaseSpriteColors(sprites: Sprite[]): void {
+        for (const sprite of sprites) {
+            const baseColor = this._baseSpriteColors.get(sprite);
+            if (!baseColor) {
+                continue;
+            }
+
+            sprite.color = baseColor.clone();
         }
     }
 
@@ -692,11 +710,7 @@ export class Enemy extends cObject {
         this.tryVelocity.multiplyScalar(maxVelocity);
     
         // 只在朝向变化时翻面，避免每帧触发缩放脏标记导致碰撞体持续重建和抖动。
-        const desiredFacing = this.tryVelocity.x < 0 ? -1 : 1;
-        if (desiredFacing !== this._facingDirection) {
-            this._facingDirection = desiredFacing;
-            this.applyVisualState();
-        }
+        this.syncFacingByVelocity(this.tryVelocity.x);
     }
 
     /**

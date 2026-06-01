@@ -2720,8 +2720,11 @@
     "mobileNearSpawnEnabled": true,
     "mobileNearSpawnMinRadius": 240,
     "mobileNearSpawnMaxRadius": 560,
-    "bossPrefab": null,
-    "bossKind": 0,
+    "bossPrefab": {
+      "__uuid__": "d811590f-8493-4b9a-b62a-a4915a9310c4",
+      "__expectedType__": "cc.Prefab"
+    },
+    "debugStartWithBossFight": true,
     "bossSpawnDelay": 1,
     "bossEntranceBufferTime": 1,
     "bossIntroWeaponLockTime": 0.6,
