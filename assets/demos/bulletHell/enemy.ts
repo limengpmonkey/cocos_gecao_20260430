@@ -207,7 +207,7 @@ export class Enemy extends cObject {
         
         // console.log(`敌人 ${this.node.name} 状态变化: ${previousState} -> ${newState}`);
         
-        if (newState === GameState.PAUSED) {
+        if (newState === GameState.PAUSED || newState === GameState.GAME_OVER) {
             this.onGamePaused();
         } else if (newState === GameState.RUNNING && previousState === GameState.PAUSED) {
             this.onGameResumed();

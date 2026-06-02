@@ -34,7 +34,7 @@ export class StateDependentComponent extends Component {
     onDestroy(): void {
         // ✅ 取消监听状态变化
         if (GameStateManager.inst) {
-            GameStateManager.inst.node.off(GameStateEvents.STATE_CHANGED, this.onGameStateChanged, this);
+            GameStateManager.inst.off(GameStateEvents.STATE_CHANGED, this.onGameStateChanged, this);
         }
     }
     

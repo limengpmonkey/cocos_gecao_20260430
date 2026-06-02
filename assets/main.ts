@@ -1,4 +1,5 @@
 import { Component, _decorator, director, log } from 'cc';
+import { SceneTransition } from './SceneTransition';
 
 const { ccclass, property } = _decorator;
 
@@ -48,24 +49,29 @@ export class ManagerScene extends Component {
     }
 
     public openHome(): void {
-        this.loadScene(this.homeSceneName);
+        if (director.getScene()?.name === 'ManagerScene') {
+            director.loadScene(this.homeSceneName);
+            return;
+        }
+
+        this.loadScene(this.homeSceneName, '返回首页...');
     }
 
     public openCollection(): void {
-        this.loadScene(this.collectionSceneName);
+        this.loadScene(this.collectionSceneName, '打开图鉴...');
     }
 
     public openGame(): void {
         log('open game scene');
-        this.loadScene(this.gameSceneName);
+        this.loadScene(this.gameSceneName, '进入战斗...');
     }
 
-    private loadScene(sceneName: string): void {
+    private loadScene(sceneName: string, message: string = '加载中...'): void {
         if (!sceneName) {
             return;
         }
 
-        director.loadScene(sceneName);
+        SceneTransition.loadScene(sceneName, message);
     }
 }
 

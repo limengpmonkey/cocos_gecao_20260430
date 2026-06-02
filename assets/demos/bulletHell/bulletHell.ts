@@ -1,4 +1,4 @@
-import { _decorator, CCInteger, Color, Component, Enum, Graphics, instantiate, Node, Prefab, Quat, Sprite, UITransform, Vec2, Vec3 } from 'cc';
+import { _decorator, BlockInputEvents, CCInteger, Color, Component, Enum, Graphics, instantiate, Label, Node, Prefab, Quat, Sprite, UITransform, UIOpacity, Vec2, Vec3, director, view } from 'cc';
 import { cCollider } from '../../collision/Collider';
 import { cObject } from '../../collision/Object';
 import { Joystick } from '../../Joystick/Joystick';
@@ -6,15 +6,18 @@ import { Bullet } from './bullet';
 import { BossEnemy } from './BossEnemy';
 import { Enemy, EnemyEvents, EnemyKilledEventData } from './enemy';
 import { ExperienceSystem } from './ExperienceSystem';
+import { GameStateManager } from './GameStateManager';
 import { Ghost } from './ghost';
 import { Gun } from './gun';
-import { Player } from './player';
+import { Player, PlayerHealthEvents } from './player';
 import { SkillSelectionSystem } from './SkillSelectionSystem';
 import { SnailTail } from './snailTail';
 import { Skill } from './skill';
 import { PickupEffectType, TemporaryPickup } from './TemporaryPickup';
 import { EliteSkillType, StageBalanceTable, getDefaultBalanceTables, samplePressureAtTime } from './balanceTable';
 import { CollectionDefinition, CollectionSystem } from './CollectionSystem';
+import { GameState } from './types';
+import { SceneTransition } from '../../SceneTransition';
 const { ccclass, property } = _decorator;
 
 const tempPos = new Vec3();
@@ -273,6 +276,10 @@ export class BulletHell extends Component {
     private _rareSpawnMissStreak = 0;
     private _lastReliefDropTime = -9999;
     private _reliefCheckTimer = 0;
+    private _playerInstance: Player = null;
+    private _isPlayerDefeated = false;
+    private _gameOverOverlay: Node = null;
+    private _gameOverStatsLabel: Label = null;
 
     static get inst() {
         return this._inst;
@@ -284,6 +291,7 @@ export class BulletHell extends Component {
     }
 
     onDestroy(): void {
+        this.detachPlayerDeathListener();
 
         Enemy.off(EnemyEvents.ON_KILLED, this.onEnemyKilled, this);
 
@@ -305,6 +313,8 @@ export class BulletHell extends Component {
         //创建主角直接挂在场景下
         let node = instantiate(this.player);
         this.node.addChild(node);
+        this._playerInstance = node.getComponent(Player);
+        this._playerInstance?.on(PlayerHealthEvents.ON_DEATH, this.onPlayerDeath, this);
 
         tempPos.set(node.scale).multiplyScalar(Math.max(0.1, this.playerVisualScaleMultiplier));
         node.setScale(tempPos);
@@ -353,6 +363,10 @@ export class BulletHell extends Component {
         this.schedule(() => {
             this.trySpawnRegularEnemy();
         }, Math.max(this.cyclTime, 0.08));
+    }
+
+    private onPlayerDeath(): void {
+        // 仅标记玩家已进入死亡流程；真正的结算逻辑在死亡动画播放完后再执行。
     }
 
     private ensureDefaultStages(): void {
@@ -676,6 +690,10 @@ export class BulletHell extends Component {
     }
 
     private trySpawnRegularEnemy(): void {
+        if (this.isGameOverActive()) {
+            return;
+        }
+
         if (this._isGameCleared) {
             return;
         }
@@ -1390,6 +1408,10 @@ export class BulletHell extends Component {
     }
 
     protected update(dt: number): void {
+        if (this.isGameOverActive()) {
+            return;
+        }
+
         if (!this._isGameCleared && !this._bossFightActive) {
             this._stageElapsedTime += dt;
         }
@@ -1428,6 +1450,10 @@ export class BulletHell extends Component {
     }
 
     lateUpdate(dt: number): void {
+        if (this.isGameOverActive()) {
+            return;
+        }
+
         //相机跟随：Boss 开场缓冲期间锁定在斗兽场中心，结束后恢复跟随玩家。
         const position = Player.inst.getPosition();
         let cameraTarget = position;
@@ -1469,6 +1495,255 @@ export class BulletHell extends Component {
         this._cameraShakeStrength = Math.max(this._cameraShakeStrength, Math.max(0, strength));
         this._cameraShakeDuration = Math.max(this._cameraShakeDuration, Math.max(0.01, duration));
         this._cameraShakeTimer = Math.max(this._cameraShakeTimer, this._cameraShakeDuration);
+    }
+
+    public handlePlayerDefeat(attacker?: Node): void {
+        if (this.isGameOverActive()) {
+            return;
+        }
+
+        this._isPlayerDefeated = true;
+        this.unscheduleAllCallbacks();
+        this._bossSpawnQueued = false;
+        this._bossAlive = false;
+        this._bossSpawned = false;
+        this._bossIntroAttackLockTime = 0;
+        this._bossIntroCameraLockTime = 0;
+        this._bossIntroGunsLocked = false;
+        this._cameraShakeDuration = 0;
+        this._cameraShakeStrength = 0;
+        this._cameraShakeTimer = 0;
+        this.deactivateBossArena();
+        this.setPlayerWeaponsEnabled(false);
+        this.clearGameplayNodes();
+
+        const summary = this.buildGameOverSummary(attacker);
+        GameStateManager.inst?.setState(GameState.GAME_OVER, summary);
+        this.showGameOverSettlement(summary);
+    }
+
+    private isGameOverActive(): boolean {
+        return !!GameStateManager.inst?.isGameOver || !!this._gameOverOverlay?.active;
+    }
+
+    private clearGameplayNodes(): void {
+        if (this.objects) {
+            for (const child of [...this.objects.children]) {
+                child.destroy();
+            }
+        }
+
+        if (this.bullets) {
+            for (const child of [...this.bullets.children]) {
+                child.destroy();
+            }
+        }
+    }
+
+    private buildGameOverSummary(attacker?: Node): { stageName: string; totalKills: number; totalScore: number; elapsedTime: number; level: number; attackerName: string } {
+        return {
+            stageName: this.getCurrentStageName(),
+            totalKills: this._totalKills,
+            totalScore: this._totalScore,
+            elapsedTime: this._stageElapsedTime,
+            level: ExperienceSystem.inst?.currentLevel ?? 1,
+            attackerName: attacker?.name || '未知',
+        };
+    }
+
+    private showGameOverSettlement(summary: { stageName: string; totalKills: number; totalScore: number; elapsedTime: number; level: number; attackerName: string }): void {
+        const overlay = this.ensureGameOverOverlay();
+        if (!overlay || !this._gameOverStatsLabel) {
+            return;
+        }
+
+        const minutes = Math.floor(summary.elapsedTime / 60);
+        const seconds = Math.floor(summary.elapsedTime % 60);
+        const minuteText = minutes < 10 ? `0${minutes}` : `${minutes}`;
+        const secondText = seconds < 10 ? `0${seconds}` : `${seconds}`;
+        const timeText = `${minuteText}:${secondText}`;
+
+        this._gameOverStatsLabel.string = [
+            `关卡：${summary.stageName}`,
+            `等级：${summary.level}`,
+            `击杀：${summary.totalKills}`,
+            `总分：${summary.totalScore}`,
+            `时长：${timeText}`,
+            `击杀者：${summary.attackerName}`,
+            '',
+            '点击“重新开始”进入下一局'
+        ].join('\n');
+        overlay.active = true;
+    }
+
+    private ensureGameOverOverlay(): Node | null {
+        if (this._gameOverOverlay && this._gameOverStatsLabel) {
+            return this._gameOverOverlay;
+        }
+
+        const parent = director.getScene()?.getChildByName('Canvas') ?? this.node;
+        if (!parent) {
+            return null;
+        }
+
+        const visibleSize = view.getVisibleSize();
+        const overlay = new Node('GameOverSettlementOverlay');
+        overlay.layer = parent.layer;
+        const overlayTransform = overlay.addComponent(UITransform);
+        overlayTransform.setContentSize(visibleSize.width, visibleSize.height);
+        overlay.addComponent(BlockInputEvents);
+        parent.addChild(overlay);
+        overlay.setSiblingIndex(parent.children.length - 1);
+        overlay.setPosition(0, 0, 0);
+        this.bindOverlayInputBlockers(overlay);
+
+        const backdrop = new Node('Backdrop');
+        backdrop.layer = parent.layer;
+        const backdropTransform = backdrop.addComponent(UITransform);
+        backdropTransform.setContentSize(visibleSize.width, visibleSize.height);
+        const backdropGraphics = backdrop.addComponent(Graphics);
+        backdropGraphics.fillColor = new Color(8, 10, 18, 210);
+        backdropGraphics.rect(-visibleSize.width * 0.5, -visibleSize.height * 0.5, visibleSize.width, visibleSize.height);
+        backdropGraphics.fill();
+        overlay.addChild(backdrop);
+        this.bindOverlayInputBlockers(backdrop);
+
+        const panelWidth = Math.min(visibleSize.width - 120, 520);
+        const panelHeight = Math.min(visibleSize.height - 140, 420);
+        const panel = new Node('Panel');
+        panel.layer = parent.layer;
+        const panelTransform = panel.addComponent(UITransform);
+        panelTransform.setContentSize(panelWidth, panelHeight);
+        const panelGraphics = panel.addComponent(Graphics);
+        panelGraphics.fillColor = new Color(24, 28, 40, 242);
+        panelGraphics.roundRect(-panelWidth * 0.5, -panelHeight * 0.5, panelWidth, panelHeight, 18);
+        panelGraphics.fill();
+        panelGraphics.lineWidth = 3;
+        panelGraphics.strokeColor = new Color(255, 214, 140, 180);
+        panelGraphics.roundRect(-panelWidth * 0.5, -panelHeight * 0.5, panelWidth, panelHeight, 18);
+        panelGraphics.stroke();
+        overlay.addChild(panel);
+        this.bindOverlayInputBlockers(panel);
+
+        const titleNode = new Node('Title');
+        titleNode.layer = parent.layer;
+        const titleTransform = titleNode.addComponent(UITransform);
+        titleTransform.setContentSize(panelWidth - 80, 48);
+        const titleLabel = titleNode.addComponent(Label);
+        titleLabel.string = '本局结算';
+        titleLabel.fontSize = 30;
+        titleLabel.lineHeight = 36;
+        titleLabel.color = new Color(255, 240, 210, 255);
+        titleNode.setPosition(0, panelHeight * 0.5 - 54, 0);
+        panel.addChild(titleNode);
+
+        const statsNode = new Node('Stats');
+        statsNode.layer = parent.layer;
+        const statsTransform = statsNode.addComponent(UITransform);
+        statsTransform.setContentSize(panelWidth - 96, 220);
+        const statsLabel = statsNode.addComponent(Label);
+        statsLabel.fontSize = 22;
+        statsLabel.lineHeight = 32;
+        statsLabel.color = new Color(224, 228, 240, 255);
+        statsNode.setPosition(0, 24, 0);
+        panel.addChild(statsNode);
+
+        const restartButton = new Node('RestartButton');
+        restartButton.layer = parent.layer;
+        const restartTransform = restartButton.addComponent(UITransform);
+        restartTransform.setContentSize(180, 60);
+        const restartGraphics = restartButton.addComponent(Graphics);
+        restartGraphics.fillColor = new Color(214, 96, 58, 255);
+        restartGraphics.roundRect(-90, -30, 180, 60, 14);
+        restartGraphics.fill();
+        restartButton.addComponent(UIOpacity).opacity = 255;
+        restartButton.setPosition(-104, -panelHeight * 0.5 + 62, 0);
+        restartButton.on(Node.EventType.TOUCH_END, this.restartCurrentScene, this);
+        panel.addChild(restartButton);
+        this.bindOverlayInputBlockers(restartButton);
+
+        const restartLabelNode = new Node('RestartLabel');
+        restartLabelNode.layer = parent.layer;
+        const restartLabelTransform = restartLabelNode.addComponent(UITransform);
+        restartLabelTransform.setContentSize(180, 40);
+        const restartLabel = restartLabelNode.addComponent(Label);
+        restartLabel.string = '重新开始';
+        restartLabel.fontSize = 24;
+        restartLabel.lineHeight = 30;
+        restartLabel.color = new Color(255, 248, 240, 255);
+        restartButton.addChild(restartLabelNode);
+
+        const homeButton = new Node('HomeButton');
+        homeButton.layer = parent.layer;
+        const homeTransform = homeButton.addComponent(UITransform);
+        homeTransform.setContentSize(180, 60);
+        const homeGraphics = homeButton.addComponent(Graphics);
+        homeGraphics.fillColor = new Color(62, 96, 140, 255);
+        homeGraphics.roundRect(-90, -30, 180, 60, 14);
+        homeGraphics.fill();
+        homeButton.addComponent(UIOpacity).opacity = 255;
+        homeButton.setPosition(104, -panelHeight * 0.5 + 62, 0);
+        homeButton.on(Node.EventType.TOUCH_END, this.returnToHomeScene, this);
+        panel.addChild(homeButton);
+        this.bindOverlayInputBlockers(homeButton);
+
+        const homeLabelNode = new Node('HomeLabel');
+        homeLabelNode.layer = parent.layer;
+        const homeLabelTransform = homeLabelNode.addComponent(UITransform);
+        homeLabelTransform.setContentSize(180, 40);
+        const homeLabel = homeLabelNode.addComponent(Label);
+        homeLabel.string = '返回';
+        homeLabel.fontSize = 24;
+        homeLabel.lineHeight = 30;
+        homeLabel.color = new Color(240, 246, 255, 255);
+        homeButton.addChild(homeLabelNode);
+
+        this._gameOverOverlay = overlay;
+        this._gameOverStatsLabel = statsLabel;
+        this._gameOverOverlay.active = false;
+        return this._gameOverOverlay;
+    }
+
+    private bindOverlayInputBlockers(node: Node): void {
+        const stop = (event: any) => {
+            if (typeof event?.propagationStopped !== 'undefined') {
+                event.propagationStopped = true;
+            }
+            if (typeof event?.stopPropagation === 'function') {
+                event.stopPropagation();
+            }
+        };
+
+        node.on(Node.EventType.TOUCH_START, stop, this);
+        node.on(Node.EventType.TOUCH_MOVE, stop, this);
+        node.on(Node.EventType.TOUCH_END, stop, this);
+        node.on(Node.EventType.TOUCH_CANCEL, stop, this);
+    }
+
+    private detachPlayerDeathListener(): void {
+        const player = this._playerInstance;
+        this._playerInstance = null;
+
+        if (!player || !player.node || !player.node.isValid) {
+            return;
+        }
+
+        player.off(PlayerHealthEvents.ON_DEATH, this.onPlayerDeath, this);
+    }
+
+    private restartCurrentScene(): void {
+        const sceneName = director.getScene()?.name;
+        if (!sceneName) {
+            return;
+        }
+
+        this.detachPlayerDeathListener();
+        SceneTransition.loadScene(sceneName, '重新开始中...');
+    }
+
+    private returnToHomeScene(): void {
+        this.detachPlayerDeathListener();
+        SceneTransition.loadScene('home', '返回首页...');
     }
 
 }

@@ -219,7 +219,7 @@
     "playOnLoad": true,
     "_clips": [
       {
-        "__uuid__": "7d79f167-79ec-45ee-9020-1018abde948a",
+        "__uuid__": "6245caaa-86f8-4467-9a1b-924edbfeea38",
         "__expectedType__": "cc.AnimationClip"
       },
       {
@@ -1518,6 +1518,32 @@
     "shield": 0,
     "invincibleTime": 2,
     "respawnTime": 3,
+    "enableFootHealthBar": true,
+    "footHealthBarBackgroundFrame": {
+      "__uuid__": "1fc89ce5-fc0c-4dae-a8bd-bc520d491bf7@f9941",
+      "__expectedType__": "cc.SpriteFrame"
+    },
+    "footHealthBarFillFrame": {
+      "__uuid__": "0fc4a112-f759-4240-a479-0952fc7ce193@f9941",
+      "__expectedType__": "cc.SpriteFrame"
+    },
+    "footHealthBarWidth": 72,
+    "footHealthBarHeight": 10,
+    "footHealthBarOffsetY": -56,
+    "footHealthBarBackgroundColor": {
+      "__type__": "cc.Color",
+      "r": 20,
+      "g": 20,
+      "b": 24,
+      "a": 210
+    },
+    "footHealthBarFillColor": {
+      "__type__": "cc.Color",
+      "r": 255,
+      "g": 255,
+      "b": 255,
+      "a": 255
+    },
     "contactDamageCooldown": 0.5,
     "skill": {
       "__uuid__": "28040096-9dbc-461a-bd60-14f739b234ae",

@@ -1,4 +1,4 @@
-import { Input, Prefab, Quat, Vec3, _decorator, CCInteger, PhysicsSystem, EventTarget, Component, Node, Renderer, Sprite, Color } from 'cc';
+import { Input, Prefab, Quat, Vec3, _decorator, CCInteger, PhysicsSystem, EventTarget, Component, Node, Renderer, Sprite, Color, Animation, AnimationClip, SpriteFrame, UITransform, Graphics } from 'cc';
 import { cBody } from '../../collision/Body';
 import { Trigger, cObject } from '../../collision/Object';
 import { BulletHell } from './bulletHell';
@@ -43,6 +43,11 @@ export class Player extends cObject {
     private _invincibleTimerCallback: () => void = null;
     private _invincibleBlinkCallback: () => void = null;
     private _hitFlashRestoreCallback: () => void = null;
+    private _footHealthBarRoot: Node = null;
+    private _footHealthBarBackground: Sprite = null;
+    private _footHealthBarFill: Sprite = null;
+    private _footHealthBarBackgroundGraphics: Graphics = null;
+    private _footHealthBarFillGraphics: Graphics = null;
     ENEMYGROUP = PhysicsSystem.PhysicsGroup["enemy"];
     // ================== 血量相关属性 ==================
     /** 最大血量 */
@@ -63,6 +68,30 @@ export class Player extends cObject {
     /** 重生时间（秒） */
     @property({ type: CCInteger, tooltip: "死亡后重生时间（秒）" })
     respawnTime: number = 3;
+
+    @property({ tooltip: "是否启用玩家脚下血条" })
+    enableFootHealthBar: boolean = true;
+
+    @property({ type: SpriteFrame, tooltip: "脚下血条底图，可直接替换贴图" })
+    footHealthBarBackgroundFrame: SpriteFrame | null = null;
+
+    @property({ type: SpriteFrame, tooltip: "脚下血条填充图，可直接替换贴图" })
+    footHealthBarFillFrame: SpriteFrame | null = null;
+
+    @property({ tooltip: "脚下血条宽度" })
+    footHealthBarWidth: number = 72;
+
+    @property({ tooltip: "脚下血条高度" })
+    footHealthBarHeight: number = 10;
+
+    @property({ tooltip: "脚下血条 Y 偏移，负值更靠近脚下" })
+    footHealthBarOffsetY: number = -56;
+
+    @property({ type: Color, tooltip: "脚下血条底图颜色" })
+    footHealthBarBackgroundColor: Color = new Color(20, 20, 24, 210);
+
+    @property({ type: Color, tooltip: "脚下血条填充颜色" })
+    footHealthBarFillColor: Color = new Color(82, 214, 126, 255);
 
     /** 身体接触敌人时的伤害间隔（秒） */
     @property({ tooltip: "身体接触伤害冷却（秒）" })
@@ -115,6 +144,8 @@ export class Player extends cObject {
 
         // 初始化技能管理器（如果场景中没有附加，也自动添加一个）
         this.skillManager = this.getComponent(SkillManager) || this.addComponent(SkillManager);
+        this.setupFootHealthBar();
+        this.refreshFootHealthBar();
     }
 
     start(): void {
@@ -144,6 +175,8 @@ export class Player extends cObject {
     }
 
     update(dt: number): void {
+        this.syncFootHealthBarTransform();
+
         // 如果玩家死亡，不执行移动逻辑
         if (this._state === PlayerState.DEAD) {
             this.velocity.set(Vec3.ZERO);
@@ -240,6 +273,7 @@ export class Player extends cObject {
         if (actualDamage > 0) {
             this._currentHp = Math.max(0, this._currentHp - actualDamage);
         }
+        this.refreshFootHealthBar();
         
         // 触发受伤事件
         this._eventTarget.emit(PlayerHealthEvents.ON_TAKE_DAMAGE, {
@@ -282,6 +316,7 @@ export class Player extends cObject {
         
         if (actualHeal > 0) {
             console.log(`玩家恢复 ${actualHeal} 点血量`);
+            this.refreshFootHealthBar();
             
             // 触发治疗事件
             this._eventTarget.emit(PlayerHealthEvents.ON_HEAL, {
@@ -330,10 +365,8 @@ export class Player extends cObject {
         
         // 播放死亡动画
         this.playDeathAnimation().then(() => {
-            // 开始重生计时
-            this.scheduleOnce(() => {
-                this.respawn();
-            }, this.respawnTime);
+            this.node.active = false;
+            BulletHell.inst?.handlePlayerDefeat(attacker);
         });
     }
     
@@ -352,6 +385,7 @@ export class Player extends cObject {
         // 恢复血量
         this._currentHp = this.maxHp;
         this.shield = 0;
+        this.refreshFootHealthBar();
 
         // 启用所有枪械
         this.enableAllGuns();
@@ -421,6 +455,137 @@ export class Player extends cObject {
             sprite.color = baseColor.clone();
         }
     }
+
+    private setupFootHealthBar(): void {
+        if (this._footHealthBarRoot || !this.enableFootHealthBar) {
+            return;
+        }
+
+        const parentNode = this.getFootHealthBarParentNode();
+
+        const root = new Node('PlayerFootHealthBar');
+        root.addComponent(UITransform).setContentSize(this.footHealthBarWidth, this.footHealthBarHeight);
+        root.layer = parentNode.layer;
+        parentNode.addChild(root);
+
+        const backgroundNode = new Node('Background');
+        backgroundNode.addComponent(UITransform).setContentSize(this.footHealthBarWidth, this.footHealthBarHeight);
+        backgroundNode.layer = parentNode.layer;
+        const backgroundSprite = backgroundNode.addComponent(Sprite);
+        const backgroundGraphics = backgroundNode.addComponent(Graphics);
+        backgroundSprite.spriteFrame = this.footHealthBarBackgroundFrame;
+        backgroundSprite.color = this.footHealthBarBackgroundColor.clone();
+        root.addChild(backgroundNode);
+
+        const fillNode = new Node('Fill');
+        fillNode.addComponent(UITransform).setContentSize(this.footHealthBarWidth, this.footHealthBarHeight);
+        fillNode.layer = parentNode.layer;
+        const fillSprite = fillNode.addComponent(Sprite);
+        const fillGraphics = fillNode.addComponent(Graphics);
+        fillSprite.spriteFrame = this.footHealthBarFillFrame;
+        fillSprite.color = this.footHealthBarFillColor.clone();
+        root.addChild(fillNode);
+
+        this._footHealthBarRoot = root;
+        this._footHealthBarBackground = backgroundSprite;
+        this._footHealthBarFill = fillSprite;
+        this._footHealthBarBackgroundGraphics = backgroundGraphics;
+        this._footHealthBarFillGraphics = fillGraphics;
+        this.syncFootHealthBarTransform();
+    }
+
+    private getFootHealthBarParentNode(): Node {
+        for (const sprite of this.node.getComponentsInChildren(Sprite)) {
+            if (sprite?.node && sprite.node !== this.node) {
+                return sprite.node;
+            }
+        }
+
+        return this.node;
+    }
+
+    private syncFootHealthBarTransform(): void {
+        if (!this._footHealthBarRoot) {
+            return;
+        }
+
+        this._footHealthBarRoot.setPosition(0, this.footHealthBarOffsetY, 0);
+        this._footHealthBarRoot.setScale(this.node.scale.x < 0 ? -1 : 1, 1, 1);
+    }
+
+    private refreshFootHealthBar(): void {
+        if (!this.enableFootHealthBar) {
+            if (this._footHealthBarRoot) {
+                this._footHealthBarRoot.active = false;
+            }
+            return;
+        }
+
+        this.setupFootHealthBar();
+        if (!this._footHealthBarRoot || !this._footHealthBarBackground || !this._footHealthBarFill) {
+            return;
+        }
+
+        const hpRate = this.maxHp > 0 ? Math.max(0, Math.min(1, this._currentHp / this.maxHp)) : 0;
+        this._footHealthBarRoot.active = this.node.active;
+        this._footHealthBarBackground.spriteFrame = this.footHealthBarBackgroundFrame;
+        this._footHealthBarBackground.color = this.footHealthBarBackgroundColor.clone();
+        this._footHealthBarFill.spriteFrame = this.footHealthBarFillFrame;
+        this._footHealthBarFill.color = this.footHealthBarFillColor.clone();
+
+        this._footHealthBarRoot.getComponent(UITransform)?.setContentSize(this.footHealthBarWidth, this.footHealthBarHeight);
+        const backgroundTransform = this._footHealthBarBackground.getComponent(UITransform);
+        backgroundTransform?.setContentSize(this.footHealthBarWidth, this.footHealthBarHeight);
+        const fillTransform = this._footHealthBarFill.getComponent(UITransform);
+        if (this.footHealthBarBackgroundFrame) {
+            this._footHealthBarBackgroundGraphics?.clear();
+        } else if (this._footHealthBarBackgroundGraphics) {
+            this._footHealthBarBackgroundGraphics.clear();
+            this._footHealthBarBackgroundGraphics.fillColor = this.footHealthBarBackgroundColor.clone();
+            this._footHealthBarBackgroundGraphics.roundRect(
+                -this.footHealthBarWidth * 0.5,
+                -this.footHealthBarHeight * 0.5,
+                this.footHealthBarWidth,
+                this.footHealthBarHeight,
+                Math.min(this.footHealthBarHeight * 0.5, 4),
+            );
+            this._footHealthBarBackgroundGraphics.fill();
+        }
+
+        if (this.footHealthBarFillFrame) {
+            this._footHealthBarFillGraphics?.clear();
+            this._footHealthBarFill.type = Sprite.Type.FILLED;
+            this._footHealthBarFill.fillType = Sprite.FillType.HORIZONTAL;
+            this._footHealthBarFill.fillStart = 0;
+            this._footHealthBarFill.fillRange = hpRate;
+            fillTransform?.setContentSize(this.footHealthBarWidth, this.footHealthBarHeight);
+            if (fillTransform) {
+                fillTransform.node.setPosition(0, 0, 0);
+            }
+        } else {
+            this._footHealthBarFill.type = Sprite.Type.SIMPLE;
+            const fillWidth = Math.max(0, this.footHealthBarWidth * hpRate);
+            fillTransform?.setContentSize(fillWidth, this.footHealthBarHeight);
+            if (fillTransform) {
+                fillTransform.node.setPosition(-(this.footHealthBarWidth - fillWidth) * 0.5, 0, 0);
+            }
+            if (this._footHealthBarFillGraphics) {
+                this._footHealthBarFillGraphics.clear();
+                if (fillWidth > 0) {
+                    this._footHealthBarFillGraphics.fillColor = this.footHealthBarFillColor.clone();
+                    this._footHealthBarFillGraphics.roundRect(
+                        -fillWidth * 0.5,
+                        -this.footHealthBarHeight * 0.5,
+                        fillWidth,
+                        this.footHealthBarHeight,
+                        Math.min(this.footHealthBarHeight * 0.5, 4),
+                    );
+                    this._footHealthBarFillGraphics.fill();
+                }
+            }
+        }
+        this.syncFootHealthBarTransform();
+    }
     
     /** 播放受伤特效 */
     private playHitEffect(): void {
@@ -456,10 +621,51 @@ export class Player extends cObject {
     
     /** 播放死亡动画 */
     private async playDeathAnimation(): Promise<void> {
-        // 实现：死亡动画、爆炸特效、游戏结束UI等
-        console.log("播放死亡动画");
+        let animation: Animation = null;
+        for (const sprite of this.node.getComponentsInChildren(Sprite)) {
+            const spriteNodeAnimation = sprite?.getComponent(Animation);
+            if (spriteNodeAnimation?.clips?.length) {
+                animation = spriteNodeAnimation;
+                break;
+            }
+        }
+
+        const deathClip = animation?.clips?.[0] || null;
+        if (!animation || !deathClip) {
+            console.log("播放死亡动画失败，回退到固定等待");
+            return new Promise(resolve => {
+                this.scheduleOnce(() => resolve(), 1.0);
+            });
+        }
+
+        console.log(`播放死亡动画: ${deathClip.name}`);
         return new Promise(resolve => {
-            this.scheduleOnce(() => resolve(), 1.0);
+            const state = animation.getState(deathClip.name);
+            if (state) {
+                state.wrapMode = AnimationClip.WrapMode.Normal;
+                state.repeatCount = 1;
+            }
+
+            let finished = false;
+            const finish = () => {
+                if (finished) {
+                    return;
+                }
+                finished = true;
+                animation.off(Animation.EventType.FINISHED, onFinished, this);
+                resolve();
+            };
+            const onFinished = () => {
+                finish();
+            };
+
+            animation.off(Animation.EventType.FINISHED, onFinished, this);
+            animation.on(Animation.EventType.FINISHED, onFinished, this);
+            animation.stop();
+            animation.play(deathClip.name);
+
+            const fallbackDuration = Math.max(0.1, deathClip.duration || state?.duration || 1.0);
+            this.scheduleOnce(finish, fallbackDuration + 0.05);
         });
     }
     
@@ -542,6 +748,10 @@ export class Player extends cObject {
      * @param target 目标对象
      */
     on(event: string, callback: EventCallback, target?: any): void {
+        if (!this._eventTarget) {
+            return;
+        }
+
         this._eventTarget.on(event, callback, target);
     }
     
@@ -552,6 +762,10 @@ export class Player extends cObject {
      * @param target 目标对象
      */
     off(event: string, callback: EventCallback, target?: any): void {
+        if (!this._eventTarget) {
+            return;
+        }
+
         this._eventTarget.off(event, callback, target);
     }
     

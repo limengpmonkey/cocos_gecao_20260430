@@ -1,4 +1,6 @@
 import { _decorator, Animation, AnimationClip, Color, Graphics, instantiate, Node, Prefab, Sprite, SpriteFrame, tween, UITransform, Vec3 } from 'cc';
+import { cBody } from '../../collision/Body';
+import { Trigger } from '../../collision/Object';
 import { CollectionSystem } from './CollectionSystem';
 import { BulletHell } from './bulletHell';
 import { Enemy } from './enemy';
@@ -13,12 +15,33 @@ const tempDashCurrPos = new Vec3();
 const tempMeteorBase = new Vec3();
 const tempMeteorOffset = new Vec3();
 const tempPlayerHitKnockback = new Vec3();
+const areaAttackKnockbackDir = new Vec3(1, -1, 0);
+
+interface ActiveMeteorHazard {
+    key: string;
+    position: Vec3;
+    timer: number;
+}
+
+interface ActiveSpiralProjectile {
+    node: Node;
+    ringIndex: number;
+    center: Vec3;
+    angle: number;
+    angularSpeed: number;
+    radius: number;
+    radialSpeed: number;
+    lifeTime: number;
+    hitRadius: number;
+    damage: number;
+}
 
 enum BossAttackType {
     None = 0,
     Dash = 1,
     Meteor = 2,
     Nova = 3,
+    Spiral = 4,
 }
 
 enum BossActionState {
@@ -26,6 +49,7 @@ enum BossActionState {
     Telegraph = 1,
     Dash = 2,
     Recover = 3,
+    Spiral = 4,
 }
 
 @ccclass('BossMetaConfig')
@@ -44,6 +68,9 @@ class BossCombatConfig {
 
     @property({ tooltip: 'Boss 每次攻击后恢复时长（秒）' })
     attackRecoverDuration: number = 0.42;
+
+    @property({ tooltip: 'Boss 各技能连续命中玩家的最小间隔（秒）' })
+    playerHitInterval: number = 0.3;
 
     @property({ tooltip: '非冲撞攻击命中玩家时的轻微击退力度' })
     followupHitKnockbackStrength: number = 280;
@@ -87,6 +114,9 @@ class BossDashConfig {
     @property({ tooltip: '冲刺伤害' })
     damage: number = 16;
 
+    @property({ tooltip: '冲刺持续命中间隔（秒）' })
+    hitInterval: number = 0.22;
+
     @property({ tooltip: '冲撞命中玩家时的击退力度' })
     knockbackStrength: number = 520;
 
@@ -111,6 +141,9 @@ class BossMeteorConfig {
     @property({ tooltip: '落点轰炸伤害' })
     damage: number = 14;
 
+    @property({ tooltip: '落点轰炸危险区域持续时长（秒）' })
+    lingerDuration: number = 1.2;
+
     @property({ tooltip: '副落点与主落点的间距倍率' })
     spreadMultiplier: number = 1.2;
 }
@@ -125,6 +158,66 @@ class BossNovaConfig {
 
     @property({ tooltip: '环爆伤害' })
     damage: number = 18;
+
+    @property({ tooltip: '环爆危险区域持续时长（秒）' })
+    lingerDuration: number = 0.65;
+}
+
+@ccclass('BossSpiralConfig')
+class BossSpiralConfig {
+    @property({ tooltip: '是否启用 Boss 漩涡抛弹技能' })
+    enabled: boolean = true;
+
+    @property({ tooltip: '漩涡抛弹读条时间（秒）' })
+    telegraphDuration: number = 0.9;
+
+    @property({ tooltip: 'Boss 原地释放漩涡抛弹的持续时长（秒）' })
+    activeDuration: number = 2.8;
+
+    @property({ type: Prefab, tooltip: '漩涡弹 prefab；为空时使用运行时圆形子弹' })
+    bulletPrefab: Prefab | null = null;
+
+    @property({ tooltip: '漩涡弹 prefab 缩放倍率；素材过大时可直接调小' })
+    bulletPrefabScale: number = 0.33;
+
+    @property({ tooltip: '每一圈抛出的子弹数量' })
+    bulletsPerRing: number = 3;
+
+    @property({ tooltip: '每一圈抛弹的间隔（秒）' })
+    spawnInterval: number = 0.22;
+
+    @property({ tooltip: '屏幕上同时保留的漩涡弹圈数，直接决定整体密度' })
+    maxVisibleRings: number = 4;
+
+    @property({ tooltip: '漩涡弹最小飞行半径；达到后才允许因寿命结束被移除' })
+    minTravelRadius: number = 460;
+
+    @property({ tooltip: '漩涡弹初始半径' })
+    startRadius: number = 26;
+
+    @property({ tooltip: '漩涡弹向外扩散速度' })
+    radialSpeed: number = 82;
+
+    @property({ tooltip: '漩涡弹角速度（度/秒）' })
+    angularSpeed: number = 99;
+
+    @property({ tooltip: '每一圈相位偏移（度）' })
+    ringAngleStep: number = 20;
+
+    @property({ tooltip: '漩涡弹生命时长（秒）' })
+    bulletLifeTime: number = 4.2;
+
+    @property({ tooltip: '漩涡弹命中半径' })
+    bulletHitRadius: number = 20;
+
+    @property({ tooltip: '漩涡弹伤害' })
+    bulletDamage: number = 9;
+
+    @property({ tooltip: '漩涡弹默认绘制半径（未配置 prefab 时使用）' })
+    bulletVisualRadius: number = 3;
+
+    @property({ type: Color, tooltip: '漩涡弹默认颜色（未配置 prefab 时使用）' })
+    bulletColor: Color = new Color(255, 158, 92, 255);
 }
 
 @ccclass('BossPhaseProfile')
@@ -146,6 +239,9 @@ class BossPhaseProfile {
 
     @property({ tooltip: '该阶段环爆权重' })
     novaWeight: number = 0;
+
+    @property({ tooltip: '该阶段漩涡抛弹权重' })
+    spiralWeight: number = 0;
 }
 
 @ccclass('BossAnimationConfig')
@@ -188,6 +284,7 @@ function createPhaseProfile(
     dashWeight: number,
     meteorWeight: number,
     novaWeight: number,
+    spiralWeight: number,
 ): BossPhaseProfile {
     const config = new BossPhaseProfile();
     config.threshold = threshold;
@@ -196,6 +293,7 @@ function createPhaseProfile(
     config.dashWeight = dashWeight;
     config.meteorWeight = meteorWeight;
     config.novaWeight = novaWeight;
+    config.spiralWeight = spiralWeight;
     return config;
 }
 
@@ -266,6 +364,12 @@ export class BossEnemy extends Enemy {
     @property({ type: BossNovaConfig, tooltip: 'Boss 环爆技能参数' })
     novaConfig: BossNovaConfig = new BossNovaConfig();
 
+    @property({ type: BossSpiralConfig, tooltip: 'Boss 漩涡抛弹技能参数' })
+    spiralConfig: BossSpiralConfig = new BossSpiralConfig();
+
+    @property({ tooltip: '调试：开启后 Boss 只释放漩涡抛弹技能' })
+    debugSpiralOnly: boolean = false;
+
     @property({ type: BossAnimationConfig, tooltip: 'Boss 动画衔接与 clip 命名配置' })
     animationConfig: BossAnimationConfig = new BossAnimationConfig();
 
@@ -285,13 +389,13 @@ export class BossEnemy extends Enemy {
     meteorImpactEffectLingerDuration: number = 0.18;
 
     @property({ type: BossPhaseProfile, tooltip: '一阶段权重与节奏参数' })
-    phaseOneConfig: BossPhaseProfile = createPhaseProfile(1, 1, 1, 0.62, 0.38, 0);
+    phaseOneConfig: BossPhaseProfile = createPhaseProfile(1, 1, 1, 0.52, 0.32, 0, 0.16);
 
     @property({ type: BossPhaseProfile, tooltip: '二阶段权重与节奏参数' })
-    phaseTwoConfig: BossPhaseProfile = createPhaseProfile(0.68, 1.1, 0.82, 0.38, 0.36, 0.26);
+    phaseTwoConfig: BossPhaseProfile = createPhaseProfile(0.68, 1.1, 0.82, 0.3, 0.26, 0.22, 0.22);
 
     @property({ type: BossPhaseProfile, tooltip: '三阶段权重与节奏参数' })
-    phaseThreeConfig: BossPhaseProfile = createPhaseProfile(0.34, 1.22, 0.64, 0.33, 0.33, 0.34);
+    phaseThreeConfig: BossPhaseProfile = createPhaseProfile(0.34, 1.22, 0.64, 0.24, 0.22, 0.24, 0.3);
 
     private _sourcePrefab: Prefab = null;
     private _attackType: BossAttackType = BossAttackType.None;
@@ -306,7 +410,14 @@ export class BossEnemy extends Enemy {
     private _dashDirection: Vec3 = new Vec3();
     private _dashDestination: Vec3 = new Vec3();
     private _dashHasHit: boolean = false;
+    private _attackHitCooldowns: Map<string, number> = new Map();
     private _meteorTargets: Vec3[] = [new Vec3(), new Vec3(), new Vec3()];
+    private _activeMeteorHazards: ActiveMeteorHazard[] = [];
+    private _activeNovaTimer: number = 0;
+    private _activeSpiralProjectiles: ActiveSpiralProjectile[] = [];
+    private _spiralCenter: Vec3 = new Vec3();
+    private _spiralSpawnTimer: number = 0;
+    private _spiralRingIndex: number = 0;
     private _animation: Animation = null;
     private _animationQueue: Array<{ name: string; loop: boolean }> = [];
     private _currentAnimationName: string = '';
@@ -333,6 +444,13 @@ export class BossEnemy extends Enemy {
         this._stateTimer = 0;
         this._attackCooldown = Math.max(0.7, this.combatConfig.attackIntervalBase * 0.9);
         this._dashHasHit = false;
+        this._attackHitCooldowns.clear();
+        this._activeMeteorHazards.length = 0;
+        this._activeNovaTimer = 0;
+        this.clearSpiralProjectiles();
+        this._spiralCenter.set(this.node.worldPosition);
+        this._spiralSpawnTimer = 0;
+        this._spiralRingIndex = 0;
         this._orbitSeed = Math.random() * Math.PI * 2;
         this.clearTelegraph();
         this.resetAnimationRuntimeState();
@@ -355,12 +473,17 @@ export class BossEnemy extends Enemy {
     }
 
     onDestroy(): void {
+        this.clearSpiralProjectiles();
         this.teardownAnimationController();
         this.clearTelegraph();
         super.onDestroy();
     }
 
     update(dt: number): void {
+        this.tickAttackHitCooldowns(dt);
+        this.updateActiveAreaHazards(dt);
+        this.updateSpiralProjectiles(dt);
+
         const dashWasActive = this._actionState === BossActionState.Dash;
         if (dashWasActive) {
             tempDashPrevPos.set(this.node.worldPosition);
@@ -374,7 +497,7 @@ export class BossEnemy extends Enemy {
 
         super.update(dt);
 
-        if (dashWasActive && this._actionState === BossActionState.Dash && !this._dashHasHit) {
+        if (dashWasActive && this._actionState === BossActionState.Dash) {
             tempDashCurrPos.set(this.node.worldPosition);
             this.tryDealDashDamage(tempDashPrevPos, tempDashCurrPos);
         }
@@ -401,7 +524,7 @@ export class BossEnemy extends Enemy {
             return;
         }
 
-        if (this._actionState === BossActionState.Telegraph || this._actionState === BossActionState.Recover) {
+        if (this._actionState === BossActionState.Telegraph || this._actionState === BossActionState.Recover || this._actionState === BossActionState.Spiral) {
             this.tryVelocity.set(Vec3.ZERO);
             this.velocity.set(Vec3.ZERO);
             return;
@@ -508,6 +631,15 @@ export class BossEnemy extends Enemy {
             return;
         }
 
+        if (this._actionState === BossActionState.Spiral) {
+            this._stateTimer = Math.max(0, this._stateTimer - dt);
+            this.updateSpiralAttack(dt);
+            if (this._stateTimer <= 0) {
+                this.finishAttackRecovery();
+            }
+            return;
+        }
+
         if (this._actionState === BossActionState.Recover) {
             this._stateTimer = Math.max(0, this._stateTimer - dt);
             if (this._stateTimer <= 0) {
@@ -526,13 +658,18 @@ export class BossEnemy extends Enemy {
     }
 
     private chooseNextAttack(): BossAttackType {
+        if (this.debugSpiralOnly && this.spiralConfig.enabled) {
+            return BossAttackType.Spiral;
+        }
+
         const phaseProfile = this.getCurrentPhaseProfile();
         const dashWeight = this.dashConfig.enabled ? Math.max(0, phaseProfile.dashWeight) : 0;
         const meteorWeight = Math.max(0, phaseProfile.meteorWeight);
         const novaWeight = Math.max(0, phaseProfile.novaWeight);
-        const totalWeight = dashWeight + meteorWeight + novaWeight;
+        const spiralWeight = this.spiralConfig.enabled ? Math.max(0, phaseProfile.spiralWeight) : 0;
+        const totalWeight = dashWeight + meteorWeight + novaWeight + spiralWeight;
         if (totalWeight <= 0.0001) {
-            return meteorWeight >= novaWeight ? BossAttackType.Meteor : BossAttackType.Nova;
+            return spiralWeight >= meteorWeight ? BossAttackType.Spiral : (meteorWeight >= novaWeight ? BossAttackType.Meteor : BossAttackType.Nova);
         }
 
         const roll = Math.random() * totalWeight;
@@ -542,7 +679,10 @@ export class BossEnemy extends Enemy {
         if (roll < dashWeight + meteorWeight) {
             return BossAttackType.Meteor;
         }
-        return BossAttackType.Nova;
+        if (roll < dashWeight + meteorWeight + novaWeight) {
+            return BossAttackType.Nova;
+        }
+        return BossAttackType.Spiral;
     }
 
     private beginTelegraph(attackType: BossAttackType): void {
@@ -557,6 +697,11 @@ export class BossEnemy extends Enemy {
         }
         if (attackType === BossAttackType.Meteor) {
             this._stateTimer = Math.max(0.15, this.meteorConfig.telegraphDuration, this.getClipDuration(this.animationConfig.preAttackClip1));
+            return;
+        }
+
+        if (attackType === BossAttackType.Spiral) {
+            this._stateTimer = Math.max(0.15, this.spiralConfig.telegraphDuration, this.getClipDuration(this.animationConfig.preAttackClip1));
             return;
         }
 
@@ -606,12 +751,18 @@ export class BossEnemy extends Enemy {
             return;
         }
 
+        if (this._attackType === BossAttackType.Spiral) {
+            this.executeSpiralAttack();
+            return;
+        }
+
         this.executeNovaAttack();
     }
 
     private executeDashAttack(): void {
         this._actionState = BossActionState.Dash;
         this._dashHasHit = false;
+        this._attackHitCooldowns.delete('dash');
         this._animationLocked = false;
         this._animationQueue.length = 0;
 
@@ -637,21 +788,26 @@ export class BossEnemy extends Enemy {
     }
 
     private executeMeteorAttack(): void {
+        this._activeMeteorHazards.length = 0;
+
+        const meteorHazardDuration = Math.max(
+            0.1,
+            this.meteorConfig.lingerDuration,
+            this.meteorImpactEffectDisplayDuration + this.meteorImpactEffectLingerDuration,
+        );
+
+        let meteorIndex = 0;
         for (const target of this._meteorTargets) {
             this.spawnMeteorImpactEffect(target);
+            this._activeMeteorHazards.push({
+                key: `meteor-${meteorIndex}`,
+                position: target.clone(),
+                timer: meteorHazardDuration,
+            });
+            meteorIndex += 1;
         }
 
-        if (Player.inst && Player.inst.isAlive) {
-            const playerPos = Player.inst.getPosition();
-            for (const target of this._meteorTargets) {
-                if (Vec3.distance(playerPos, target) <= this.meteorConfig.radius) {
-                    if (Player.inst.takeDamage(this.meteorConfig.damage, this.node)) {
-                        this.applyFollowupAttackKnockback();
-                    }
-                    break;
-                }
-            }
-        }
+        this.applyMeteorHazardDamage();
 
         this.finishAttackRecovery();
     }
@@ -703,16 +859,21 @@ export class BossEnemy extends Enemy {
     }
 
     private executeNovaAttack(): void {
-        if (Player.inst && Player.inst.isAlive) {
-            const playerPos = Player.inst.getPosition();
-            if (Vec3.distance(playerPos, this.getPosition()) <= this.novaConfig.radius) {
-                if (Player.inst.takeDamage(this.novaConfig.damage, this.node)) {
-                    this.applyFollowupAttackKnockback();
-                }
-            }
-        }
+        this._activeNovaTimer = Math.max(this._activeNovaTimer, this.novaConfig.lingerDuration);
+        this.applyNovaHazardDamage();
 
         this.finishAttackRecovery();
+    }
+
+    private executeSpiralAttack(): void {
+        this._actionState = BossActionState.Spiral;
+        this._stateTimer = Math.max(0.3, this.spiralConfig.activeDuration);
+        this._spiralCenter.set(this.node.worldPosition);
+        this._spiralSpawnTimer = 0;
+        this._spiralRingIndex = 0;
+        this.velocity.set(Vec3.ZERO);
+        this.tryVelocity.set(Vec3.ZERO);
+        this.spawnSpiralRing();
     }
 
     private finishAttackRecovery(): void {
@@ -721,7 +882,160 @@ export class BossEnemy extends Enemy {
         this._attackCooldown = this.computeNextAttackCooldown();
         this._attackType = BossAttackType.None;
         this._dashHasHit = false;
+        this._attackHitCooldowns.delete('dash');
         this.clearTelegraph();
+    }
+
+    private updateSpiralAttack(dt: number): void {
+        if (this._actionState !== BossActionState.Spiral) {
+            return;
+        }
+
+        this.tryVelocity.set(Vec3.ZERO);
+        this.velocity.set(Vec3.ZERO);
+
+        this._spiralSpawnTimer -= Math.max(0, dt);
+        while (this._spiralSpawnTimer <= 0) {
+            this.spawnSpiralRing();
+            this._spiralSpawnTimer += Math.max(0.05, this.spiralConfig.spawnInterval);
+        }
+    }
+
+    private spawnSpiralRing(): void {
+        const bulletsPerRing = Math.max(1, Math.floor(this.spiralConfig.bulletsPerRing));
+        const step = (Math.PI * 2) / bulletsPerRing;
+        const baseAngle = this._spiralRingIndex * (this.spiralConfig.ringAngleStep * Math.PI / 180);
+        const angularSpeed = this.spiralConfig.angularSpeed * Math.PI / 180;
+        const currentRingIndex = this._spiralRingIndex;
+        const spiralLifetime = Math.max(0.2, this.spiralConfig.bulletLifeTime);
+
+        for (let i = 0; i < bulletsPerRing; i += 1) {
+            const angle = baseAngle + step * i;
+            const node = this.createSpiralProjectileNode();
+            if (!node) {
+                continue;
+            }
+
+            const projectile: ActiveSpiralProjectile = {
+                node,
+                ringIndex: currentRingIndex,
+                center: this._spiralCenter.clone(),
+                angle,
+                angularSpeed,
+                radius: Math.max(0, this.spiralConfig.startRadius),
+                radialSpeed: Math.max(10, this.spiralConfig.radialSpeed),
+                lifeTime: spiralLifetime,
+                hitRadius: Math.max(4, this.spiralConfig.bulletHitRadius),
+                damage: Math.max(1, this.spiralConfig.bulletDamage),
+            };
+            this.positionSpiralProjectile(projectile);
+            this._activeSpiralProjectiles.push(projectile);
+        }
+
+        this._spiralRingIndex += 1;
+        this.pruneOldSpiralRings();
+    }
+
+    private createSpiralProjectileNode(): Node | null {
+        const parent = BulletHell.inst?.bullets ?? this.node.parent;
+        if (!parent) {
+            return null;
+        }
+
+        let node: Node;
+        if (this.spiralConfig.bulletPrefab) {
+            node = instantiate(this.spiralConfig.bulletPrefab);
+            const prefabScale = Math.max(0.01, this.spiralConfig.bulletPrefabScale);
+            node.setScale(prefabScale, prefabScale, 1);
+        } else {
+            node = new Node(`${this.node.name}-SpiralBullet`);
+            node.layer = parent.layer;
+            const transform = node.addComponent(UITransform);
+            const visualRadius = Math.max(2, this.spiralConfig.bulletVisualRadius);
+            transform.setContentSize(visualRadius * 2 + 4, visualRadius * 2 + 4);
+            const graphics = node.addComponent(Graphics);
+            graphics.fillColor = this.spiralConfig.bulletColor.clone();
+            graphics.circle(0, 0, visualRadius);
+            graphics.fill();
+        }
+
+        node.layer = parent.layer;
+        parent.addChild(node);
+        return node;
+    }
+
+    private updateSpiralProjectiles(dt: number): void {
+        if (this._activeSpiralProjectiles.length <= 0) {
+            return;
+        }
+
+        const player = Player.inst;
+        const playerPos = player?.node?.worldPosition ?? null;
+        for (let i = this._activeSpiralProjectiles.length - 1; i >= 0; i -= 1) {
+            const projectile = this._activeSpiralProjectiles[i];
+            if (!projectile.node || !projectile.node.isValid) {
+                this._activeSpiralProjectiles.splice(i, 1);
+                continue;
+            }
+
+            projectile.lifeTime = Math.max(0, projectile.lifeTime - dt);
+            projectile.radius += projectile.radialSpeed * Math.max(0, dt);
+            projectile.angle += projectile.angularSpeed * Math.max(0, dt);
+            this.positionSpiralProjectile(projectile);
+
+            let shouldRemove = projectile.lifeTime <= 0 && projectile.radius >= Math.max(0, this.spiralConfig.minTravelRadius);
+            if (!shouldRemove && player && player.isAlive && playerPos) {
+                const dx = projectile.node.worldPosition.x - playerPos.x;
+                const dy = projectile.node.worldPosition.y - playerPos.y;
+                const hitRadius = projectile.hitRadius + 12;
+                if ((dx * dx + dy * dy) <= hitRadius * hitRadius) {
+                    if (player.takeDamage(projectile.damage, this.node)) {
+                        player.applyKnockback(areaAttackKnockbackDir, this.combatConfig.followupHitKnockbackStrength, this.combatConfig.followupHitKnockbackDuration, this.combatConfig.followupHitKnockbackSustainDuration);
+                    }
+                    shouldRemove = true;
+                }
+            }
+
+            if (shouldRemove) {
+                projectile.node.destroy();
+                this._activeSpiralProjectiles.splice(i, 1);
+            }
+        }
+    }
+
+    private positionSpiralProjectile(projectile: ActiveSpiralProjectile): void {
+        const x = projectile.center.x + Math.cos(projectile.angle) * projectile.radius;
+        const y = projectile.center.y + Math.sin(projectile.angle) * projectile.radius;
+        projectile.node.setWorldPosition(x, y, projectile.center.z);
+    }
+
+    private clearSpiralProjectiles(): void {
+        for (const projectile of this._activeSpiralProjectiles) {
+            if (projectile.node && projectile.node.isValid) {
+                projectile.node.destroy();
+            }
+        }
+        this._activeSpiralProjectiles.length = 0;
+    }
+
+    private pruneOldSpiralRings(): void {
+        const maxVisibleRings = Math.max(1, Math.floor(this.spiralConfig.maxVisibleRings));
+        const minRingIndex = this._spiralRingIndex - maxVisibleRings;
+        if (minRingIndex <= 0) {
+            return;
+        }
+
+        for (let i = this._activeSpiralProjectiles.length - 1; i >= 0; i -= 1) {
+            const projectile = this._activeSpiralProjectiles[i];
+            if (projectile.ringIndex >= minRingIndex) {
+                continue;
+            }
+
+            if (projectile.node && projectile.node.isValid) {
+                projectile.node.destroy();
+            }
+            this._activeSpiralProjectiles.splice(i, 1);
+        }
     }
 
     private computeNextAttackCooldown(): number {
@@ -767,15 +1081,163 @@ export class BossEnemy extends Enemy {
             return;
         }
 
-        this._dashHasHit = true;
-        if (Player.inst.takeDamage(this.dashConfig.damage, this.node)) {
-            tempPlayerHitKnockback.set(this._dashDirection);
-            Player.inst.applyKnockback(
-                tempPlayerHitKnockback,
-                this.dashConfig.knockbackStrength,
-                this.dashConfig.knockbackDuration,
+        this.tryApplyDashHit(this._dashDirection);
+    }
+
+    onTrigger(b: cBody, trigger: Trigger): void {
+        if (b.group === this.PLAYER && trigger !== Trigger.exit) {
+            this.tryApplyDashHit();
+            return;
+        }
+
+        super.onTrigger(b, trigger);
+    }
+
+    private tryApplyDashHit(direction?: Vec3): void {
+        if (this._actionState !== BossActionState.Dash) {
+            return;
+        }
+
+        const didHit = this.tryApplyPlayerHit(
+            'dash',
+            this.dashConfig.damage,
+            this.dashConfig.hitInterval,
+            this.dashConfig.knockbackStrength,
+            this.dashConfig.knockbackDuration,
+            0,
+            direction,
+            this.dashConfig.hitShakeStrength,
+            this.dashConfig.hitShakeDuration,
+        );
+
+        if (didHit) {
+            this._dashHasHit = true;
+        }
+    }
+
+    private tryApplyPlayerHit(
+        key: string,
+        damage: number,
+        interval: number,
+        knockbackStrength: number,
+        knockbackDuration: number,
+        knockbackSustainDuration: number = 0,
+        direction?: Vec3,
+        shakeStrength: number = 0,
+        shakeDuration: number = 0,
+    ): boolean {
+        if (!Player.inst || !Player.inst.isAlive) {
+            return false;
+        }
+
+        if ((this._attackHitCooldowns.get(key) ?? 0) > 0) {
+            return false;
+        }
+
+        if (!Player.inst.takeDamage(damage, this.node)) {
+            return false;
+        }
+
+        tempPlayerHitKnockback.set(direction ?? areaAttackKnockbackDir);
+        if (tempPlayerHitKnockback.lengthSqr() <= 0.001) {
+            Vec3.subtract(tempPlayerHitKnockback, Player.inst.node.worldPosition, this.node.worldPosition);
+            if (tempPlayerHitKnockback.lengthSqr() <= 0.001) {
+                tempPlayerHitKnockback.set(1, -1, 0);
+            }
+        }
+        tempPlayerHitKnockback.normalize();
+
+        Player.inst.applyKnockback(
+            tempPlayerHitKnockback,
+            knockbackStrength,
+            knockbackDuration,
+            knockbackSustainDuration,
+        );
+
+        this._attackHitCooldowns.set(key, Math.max(0.03, interval));
+        if (shakeStrength > 0 && shakeDuration > 0) {
+            BulletHell.inst?.triggerCameraShake(shakeStrength, shakeDuration);
+        }
+
+        return true;
+    }
+
+    private updateActiveAreaHazards(dt: number): void {
+        if (this._activeMeteorHazards.length > 0) {
+            for (let i = this._activeMeteorHazards.length - 1; i >= 0; i -= 1) {
+                const hazard = this._activeMeteorHazards[i];
+                hazard.timer = Math.max(0, hazard.timer - dt);
+                if (hazard.timer <= 0) {
+                    this._activeMeteorHazards.splice(i, 1);
+                    continue;
+                }
+            }
+
+            this.applyMeteorHazardDamage();
+        }
+
+        if (this._activeNovaTimer > 0) {
+            this._activeNovaTimer = Math.max(0, this._activeNovaTimer - dt);
+            this.applyNovaHazardDamage();
+        }
+    }
+
+    private applyMeteorHazardDamage(): void {
+        if (!Player.inst || !Player.inst.isAlive) {
+            return;
+        }
+
+        const playerPos = Player.inst.getPosition();
+        for (const hazard of this._activeMeteorHazards) {
+            if (Vec3.distance(playerPos, hazard.position) > this.meteorConfig.radius) {
+                continue;
+            }
+
+            this.tryApplyPlayerHit(
+                hazard.key,
+                this.meteorConfig.damage,
+                this.combatConfig.playerHitInterval,
+                this.combatConfig.followupHitKnockbackStrength,
+                this.combatConfig.followupHitKnockbackDuration,
+                this.combatConfig.followupHitKnockbackSustainDuration,
+                areaAttackKnockbackDir,
             );
-            BulletHell.inst?.triggerCameraShake(this.dashConfig.hitShakeStrength, this.dashConfig.hitShakeDuration);
+        }
+    }
+
+    private applyNovaHazardDamage(): void {
+        if (!Player.inst || !Player.inst.isAlive) {
+            return;
+        }
+
+        if (Vec3.distance(Player.inst.getPosition(), this.getPosition()) > this.novaConfig.radius) {
+            return;
+        }
+
+        this.tryApplyPlayerHit(
+            'nova',
+            this.novaConfig.damage,
+            this.combatConfig.playerHitInterval,
+            this.combatConfig.followupHitKnockbackStrength,
+            this.combatConfig.followupHitKnockbackDuration,
+            this.combatConfig.followupHitKnockbackSustainDuration,
+            areaAttackKnockbackDir,
+        );
+    }
+
+    private tickAttackHitCooldowns(dt: number): void {
+        if (this._attackHitCooldowns.size <= 0) {
+            return;
+        }
+
+        for (const [key, remaining] of [...this._attackHitCooldowns.entries()]) {
+            const next = Math.max(0, remaining - dt);
+            if (next <= 0) {
+                this._attackHitCooldowns.delete(key);
+                continue;
+            }
+
+            this._attackHitCooldowns.set(key, next);
         }
     }
 
@@ -884,6 +1346,15 @@ export class BossEnemy extends Enemy {
                 graphics.fill();
                 graphics.stroke();
             }
+            return;
+        }
+
+        if (this._attackType === BossAttackType.Spiral) {
+            graphics.circle(this.node.worldPosition.x, this.node.worldPosition.y, 96);
+            graphics.fill();
+            graphics.stroke();
+            graphics.circle(this.node.worldPosition.x, this.node.worldPosition.y, 156);
+            graphics.stroke();
             return;
         }
 

@@ -258,6 +258,10 @@ export class ExperienceSystem extends Component {
      * @param target 目标对象
      */
     off(event: ExperienceEvents, callback?: (...args: any[]) => void, target?: any): void {
+        if (!this.node || !this.node.isValid) {
+            return;
+        }
+
         this.node.off(event, callback, target);
     }
 }

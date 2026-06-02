@@ -341,6 +341,10 @@ export class GameStateManager extends Component {
      * 使用 Node 的 off 方法
      */
     off(event: GameStateEvents, callback?: (...args: any[]) => void, target?: any): void {
+        if (!this.node || !this.node.isValid) {
+            return;
+        }
+
         this.node.off(event, callback, target);
     }
     

@@ -216,7 +216,7 @@ export class SkillSelectionSystem extends Component {
      */
     private removeEventListeners(): void {
         if (ExperienceSystem.inst) {
-            ExperienceSystem.inst.node.off(ExperienceEvents.ON_LEVEL_UP, this.onLevelUp, this);
+            ExperienceSystem.inst.off(ExperienceEvents.ON_LEVEL_UP, this.onLevelUp, this);
         }
         this._isLevelListenerBound = false;
     }

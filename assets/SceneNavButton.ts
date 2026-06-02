@@ -1,6 +1,7 @@
 import { _decorator, Button, Color, Component, director, Graphics, instantiate, Label, Layout, Node, Sprite, SpriteFrame, UITransform, Vec3, Widget, warn } from 'cc';
 import { CollectionEntrySnapshot, CollectionSystem } from './demos/bulletHell/CollectionSystem';
 import { ManagerScene } from './main';
+import { SceneTransition } from './SceneTransition';
 
 const { ccclass, property } = _decorator;
 
@@ -61,6 +62,7 @@ export class SceneNavButton extends Component {
     debugSetCollectionProgressCount: number = 100;
 
     start(): void {
+        this.prewarmPrimaryScenes();
         this.applyCollectionDebugOverrides();
 
         if (this.bindExistingCollectionScene()) {
@@ -74,6 +76,18 @@ export class SceneNavButton extends Component {
         this.buildCollectionSceneRuntime();
     }
 
+    private prewarmPrimaryScenes(): void {
+        const sceneName = director.getScene()?.name;
+        if (sceneName === this.homeSceneName) {
+            SceneTransition.preloadScene(this.gameSceneName);
+            return;
+        }
+
+        if (sceneName === this.gameSceneName) {
+            SceneTransition.preloadScene(this.homeSceneName);
+        }
+    }
+
     public goHome(): void {
         const manager = ManagerScene.getInstance();
         if (manager) {
@@ -82,7 +96,7 @@ export class SceneNavButton extends Component {
         }
 
         warn('[SceneNavButton] ManagerScene not found, fallback to direct load home');
-        director.loadScene(this.homeSceneName);
+        SceneTransition.loadScene(this.homeSceneName, '返回首页...');
     }
 
     public goCollection(): void {
@@ -93,7 +107,7 @@ export class SceneNavButton extends Component {
         }
 
         warn('[SceneNavButton] ManagerScene not found, fallback to direct load collection');
-        director.loadScene(this.collectionSceneName);
+        SceneTransition.loadScene(this.collectionSceneName, '打开图鉴...');
     }
 
     public goGame(): void {
@@ -104,7 +118,7 @@ export class SceneNavButton extends Component {
         }
 
         warn('[SceneNavButton] ManagerScene not found, fallback to direct load game');
-        director.loadScene(this.gameSceneName);
+        SceneTransition.loadScene(this.gameSceneName, '进入战斗...');
     }
 
     private shouldBootstrapCollectionScene(): boolean {
