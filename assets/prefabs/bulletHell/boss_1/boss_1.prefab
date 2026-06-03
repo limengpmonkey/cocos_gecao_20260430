@@ -235,7 +235,7 @@
     "spiralConfig": {
       "__id__": 16
     },
-    "debugSpiralOnly": true,
+    "debugSpiralOnly": false,
     "animationConfig": {
       "__id__": 17
     },
@@ -323,8 +323,11 @@
       "__uuid__": "823e7fc3-bf29-4eaf-bf62-d3b4973e32e8",
       "__expectedType__": "cc.Prefab"
     },
+    "bulletPrefabScale": 0.33,
     "bulletsPerRing": 10,
     "spawnInterval": 0.16,
+    "maxVisibleRings": 4,
+    "minTravelRadius": 460,
     "startRadius": 26,
     "radialSpeed": 122,
     "angularSpeed": 220,

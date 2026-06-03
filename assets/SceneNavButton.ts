@@ -1,5 +1,6 @@
-import { _decorator, Button, Color, Component, director, Graphics, instantiate, Label, Layout, Node, Sprite, SpriteFrame, UITransform, Vec3, Widget, warn } from 'cc';
+import { _decorator, Button, Color, Component, director, Graphics, instantiate, Label, Layout, Node, Prefab, Sprite, SpriteFrame, UITransform, Vec3, Widget, warn } from 'cc';
 import { CollectionEntrySnapshot, CollectionSystem } from './demos/bulletHell/CollectionSystem';
+import { CollectionDetailPanel } from './CollectionDetailPanel';
 import { ManagerScene } from './main';
 import { SceneTransition } from './SceneTransition';
 
@@ -12,6 +13,24 @@ interface ExistingCollectionFilterButton {
     node: Node;
     label: Label | null;
     sprite: Sprite | null;
+}
+
+@ccclass('CollectionCardVisualBinding')
+class CollectionCardVisualBinding {
+    @property({ tooltip: '图鉴 ID，例如 ghost、stage1_can_champion' })
+    collectionId: string = '';
+
+    @property({ type: SpriteFrame, tooltip: '列表卡片小图标' })
+    cardIcon: SpriteFrame | null = null;
+
+    @property({ type: SpriteFrame, tooltip: '卡片预览区域图片' })
+    previewFrame: SpriteFrame | null = null;
+
+    @property({ type: SpriteFrame, tooltip: '详情页图标' })
+    detailIcon: SpriteFrame | null = null;
+
+    @property({ type: Prefab, tooltip: '详情页图标位展示用动画 prefab；配置后会优先显示该 prefab。' })
+    detailDisplayPrefab: Prefab | null = null;
 }
 
 @ccclass('SceneNavButton')
@@ -30,12 +49,17 @@ export class SceneNavButton extends Component {
     private _collectionFilter: CollectionFilterKey = 'all';
     private _existingProgressTitleLabel: Label | null = null;
     private _existingProgressValueLabel: Label | null = null;
+    private _existingSelectedContainer: Node | null = null;
     private _existingScrollViewNode: Node | null = null;
     private _existingScrollViewViewNode: Node | null = null;
     private _existingContentNode: Node | null = null;
     private _existingItemTemplate: Node | null = null;
     private _existingFilterButtons: ExistingCollectionFilterButton[] = [];
-    private _collectionCardPreviewFrame: SpriteFrame | null = null;
+    private _detailPanelNode: Node | null = null;
+    private _detailPanelBinding: CollectionDetailPanel | null = null;
+    private _detailIconSprite: Sprite | null = null;
+    private _detailDisplayHost: Node | null = null;
+    private _detailDisplayInstance: Node | null = null;
 
     @property
     homeSceneName: string = 'home';
@@ -60,6 +84,21 @@ export class SceneNavButton extends Component {
 
     @property({ tooltip: '测试用：给上面 id 写入的击杀数。达到阈值后会直接显示为已解锁。' })
     debugSetCollectionProgressCount: number = 100;
+
+    @property({
+        type: [CollectionCardVisualBinding],
+        tooltip: '按 collectionId 配置卡片列表图标、预览图和详情图标'
+    })
+    collectionCardVisualBindings: CollectionCardVisualBinding[] = [];
+
+    @property({ type: SpriteFrame, tooltip: '未命中图标绑定时使用的默认卡片图标' })
+    fallbackCollectionCardIcon: SpriteFrame | null = null;
+
+    @property({ type: SpriteFrame, tooltip: '未命中图标绑定时使用的默认详情图标' })
+    fallbackCollectionDetailIcon: SpriteFrame | null = null;
+
+    @property({ type: Prefab, tooltip: '图鉴详情面板 Prefab。配置后将接管详情区域，方便替换和管理。' })
+    collectionDetailPanelPrefab: Prefab | null = null;
 
     start(): void {
         this.prewarmPrimaryScenes();
@@ -173,18 +212,19 @@ export class SceneNavButton extends Component {
         }
 
         this._existingCollectionBound = true;
+        this._existingSelectedContainer = selectedContainer;
         this._existingScrollViewNode = scrollViewNode;
         this._existingScrollViewViewNode = viewNode;
         this._existingContentNode = contentNode;
         this._existingItemTemplate = itemTemplate;
         this._existingItemTemplate.active = false;
-        this._collectionCardPreviewFrame = this.resolveCollectionPreviewFrame();
 
         this.configureExistingCollectionGridLayout();
 
         this.bindExistingHeaderButtons(header);
         this.bindExistingProgressLabels();
         this.bindExistingFilterButtons(selectedContainer);
+        this.ensureCollectionDetailPanelForExistingScene();
         this.refreshExistingCollectionView();
         return true;
     }
@@ -249,6 +289,32 @@ export class SceneNavButton extends Component {
             settingButtonNode.off(Node.EventType.TOUCH_END);
             settingButtonNode.on(Node.EventType.TOUCH_END, () => this.goGame(), this);
         }
+
+        this.ensureExistingCollectionResetButton(header);
+    }
+
+    private ensureExistingCollectionResetButton(header: Node): void {
+        let resetButtonNode = header.getChildByName('CollectionResetButton');
+        if (!resetButtonNode) {
+            resetButtonNode = new Node('CollectionResetButton');
+            resetButtonNode.layer = header.layer;
+            resetButtonNode.setPosition(228, 0, 0);
+            resetButtonNode.addComponent(UITransform).setContentSize(132, 42);
+            const graphics = resetButtonNode.addComponent(Graphics);
+            graphics.fillColor = this.colorFromHex('#6f2f2f');
+            graphics.strokeColor = this.colorFromHex('#ff9e7a');
+            graphics.lineWidth = 2;
+            graphics.roundRect(-66, -21, 132, 42, 12);
+            graphics.fill();
+            graphics.stroke();
+
+            const label = this.createLabel(resetButtonNode, 'CollectionResetLabel', '清空图鉴', 18, '#fff4df', new Vec3(0, 0, 0), 132, 24, 0.5, 0.5);
+            label.enableWrapText = false;
+            header.addChild(resetButtonNode);
+        }
+
+        resetButtonNode.off(Node.EventType.TOUCH_END);
+        resetButtonNode.on(Node.EventType.TOUCH_END, () => this.resetCollectionProgress(), this);
     }
 
     private bindExistingProgressLabels(): void {
@@ -300,11 +366,12 @@ export class SceneNavButton extends Component {
 
         const entries = this.getFilteredCollectionEntries();
         if (entries.length <= 0) {
+            this.setDetailPanelVisibility(false);
             return;
         }
 
         if (!entries.some(entry => entry.definition.id === this._selectedCollectionId)) {
-            this._selectedCollectionId = entries[0].definition.id;
+            this._selectedCollectionId = '';
         }
 
         for (const child of [...this._existingContentNode.children]) {
@@ -330,6 +397,7 @@ export class SceneNavButton extends Component {
             button.zoomScale = 1.03;
             itemNode.off(Node.EventType.TOUCH_END);
             itemNode.on(Node.EventType.TOUCH_END, () => {
+                console.log('[SceneNavButton] 点击图鉴卡片(现有场景)', entry.definition.id, entry.definition.name);
                 this._selectedCollectionId = entry.definition.id;
                 CollectionSystem.markSeen(entry.definition.id);
                 this.refreshExistingCollectionView();
@@ -340,6 +408,14 @@ export class SceneNavButton extends Component {
 
         this.refreshExistingProgressLabels(entries);
         this.refreshExistingFilterButtonStyles();
+
+        const selected = entries.find(entry => entry.definition.id === this._selectedCollectionId) ?? null;
+        if (!selected) {
+            this.setDetailPanelVisibility(false);
+            return;
+        }
+
+        this.updateDetailPanel(selected);
     }
 
     private getFilteredCollectionEntries(): CollectionEntrySnapshot[] {
@@ -384,6 +460,297 @@ export class SceneNavButton extends Component {
         }
     }
 
+    private ensureCollectionDetailPanelForExistingScene(): void {
+        if (!this._existingSelectedContainer || this._detailPanelBinding || this._detailTitle) {
+            return;
+        }
+
+        const hostParent = this.node.parent ?? this.node;
+        const host = new Node('CollectionDetailPanelHost');
+        host.layer = hostParent.layer;
+        const hostTransform = host.addComponent(UITransform);
+        const parentTransform = hostParent.getComponent(UITransform);
+        hostTransform.setContentSize(parentTransform?.contentSize.width ?? 720, parentTransform?.contentSize.height ?? 1280);
+        const hostWidget = host.addComponent(Widget);
+        hostWidget.isAlignTop = true;
+        hostWidget.isAlignBottom = true;
+        hostWidget.isAlignLeft = true;
+        hostWidget.isAlignRight = true;
+        hostWidget.top = 0;
+        hostWidget.bottom = 0;
+        hostWidget.left = 0;
+        hostWidget.right = 0;
+        host.setPosition(0, 0, 0);
+        hostParent.addChild(host);
+        this.bringNodeToFront(host);
+
+        const panelAnchor = new Node('CollectionDetailPanelAnchor');
+        panelAnchor.layer = host.layer;
+        panelAnchor.addComponent(UITransform).setContentSize(680, 520);
+        panelAnchor.setPosition(0, -40, 0);
+        host.addChild(panelAnchor);
+
+        const detailNode = this.instantiateCollectionDetailPanelPrefab(panelAnchor.layer);
+        if (detailNode) {
+            panelAnchor.addChild(detailNode);
+            detailNode.setPosition(0, 0, 0);
+
+            this._detailPanelNode = detailNode;
+            this._detailPanelBinding = this.prepareCollectionDetailPanel(detailNode);
+            this._detailPanelBinding?.bindActions(
+                () => this.goHome(),
+                () => this.goGame(),
+                () => this.resetCollectionProgress(),
+                this,
+            );
+            this.setDetailPanelVisibility(false);
+            return;
+        }
+
+        this.buildExistingCollectionFallbackDetailPanel(panelAnchor);
+        this.setDetailPanelVisibility(false);
+    }
+
+    private instantiateCollectionDetailPanelPrefab(layer: number): Node | null {
+        if (!this.collectionDetailPanelPrefab) {
+            return null;
+        }
+
+        try {
+            const detailNode = instantiate(this.collectionDetailPanelPrefab);
+            this.applyLayerRecursively(detailNode, layer);
+            console.log('[SceneNavButton] 图鉴详情 prefab 实例化成功', detailNode.name, this.collectionDetailPanelPrefab.name);
+            return detailNode;
+        } catch (error) {
+            console.warn('[SceneNavButton] 图鉴详情 prefab 实例化失败，已回退内置详情面板', error);
+            return null;
+        }
+    }
+
+    private buildExistingCollectionFallbackDetailPanel(parent: Node): void {
+        const detailPanel = this.createPanel(parent, 'DetailPanel', 660, 468, 0, 0, '#1f2732', '#ffcf70');
+        const detailDisplayHost = new Node('DetailDisplayHost');
+        detailDisplayHost.layer = detailPanel.layer;
+        detailDisplayHost.setPosition(-248, 170, 0);
+        detailDisplayHost.addComponent(UITransform).setContentSize(120, 120);
+        detailPanel.addChild(detailDisplayHost);
+        this._detailDisplayHost = detailDisplayHost;
+
+        const detailIconNode = new Node('DetailIconSprite');
+        detailIconNode.setPosition(-248, 170, 1);
+        detailIconNode.addComponent(UITransform).setContentSize(88, 88);
+        this._detailIconSprite = detailIconNode.addComponent(Sprite);
+        this._detailIconSprite.node.active = false;
+        detailPanel.addChild(detailIconNode);
+        this._detailIcon = this.createLabel(detailPanel, 'DetailIcon', '--', 38, '#ffcf70', new Vec3(-248, 170, 1), 96, 72);
+        this._detailTitle = this.createLabel(detailPanel, 'DetailTitle', '', 30, '#fff6d8', new Vec3(-220, 176, 0), 470, 40);
+        this._detailStatus = this.createLabel(detailPanel, 'DetailStatus', '', 16, '#8fd7d8', new Vec3(-220, 136, 0), 470, 26);
+        this._detailDescription = this.createLabel(detailPanel, 'DetailDescription', '', 18, '#d5dde4', new Vec3(-300, 84, 0), 600, 176);
+        this._detailStrategy = this.createLabel(detailPanel, 'DetailStrategy', '', 16, '#a5d8c6', new Vec3(-300, -82, 0), 600, 170);
+
+        const homeButton = this.createPanel(detailPanel, 'HomeAction', 180, 54, -108, -184, '#36576a', '#79f2de');
+        this.createLabel(homeButton, 'HomeActionLabel', '返回主页', 20, '#f8f4e2', new Vec3(0, 0, 0), 180, 28, 0.5, 0.5);
+        homeButton.on(Node.EventType.TOUCH_END, () => this.goHome(), this);
+
+        const gameButton = this.createPanel(detailPanel, 'GameAction', 180, 54, 108, -184, '#725538', '#ffcf70');
+        this.createLabel(gameButton, 'GameActionLabel', '开始狩猎', 20, '#fff7df', new Vec3(0, 0, 0), 180, 28, 0.5, 0.5);
+        gameButton.on(Node.EventType.TOUCH_END, () => this.goGame(), this);
+
+        const resetButton = this.createPanel(detailPanel, 'ResetCollectionAction', 180, 48, 0, -246, '#6f2f2f', '#ff9e7a');
+        this.createLabel(resetButton, 'ResetCollectionActionLabel', '清空图鉴', 18, '#fff4df', new Vec3(0, 0, 0), 180, 24, 0.5, 0.5);
+        resetButton.on(Node.EventType.TOUCH_END, () => this.resetCollectionProgress(), this);
+    }
+
+    private prepareCollectionDetailPanel(detailNode: Node): CollectionDetailPanel | null {
+        const contentNode = this.resolveDetailPanelContentNode(detailNode);
+        const iconLabelNode = this.findNodeByName(contentNode, 'DetailIconLabel');
+        const titleNode = this.findNodeByName(contentNode, 'DetailTitle');
+        const statusNode = this.findNodeByName(contentNode, 'DetailStatus');
+        const descriptionNode = this.findNodeByName(contentNode, 'DetailDescription');
+        const strategyNode = this.findNodeByName(contentNode, 'DetailStrategy');
+        const binding = this.findDetailPanelBinding(detailNode, contentNode);
+        binding.iconDisplayHost = binding.iconDisplayHost ?? this.findNodeByName(contentNode, 'DetailDisplayHost');
+        binding.iconSprite = binding.iconSprite ?? this.findNodeByName(contentNode, 'DetailIconSprite')?.getComponent(Sprite) ?? null;
+        binding.iconLabel = binding.iconLabel ?? (iconLabelNode ? this.findLabelInNode(iconLabelNode) : null);
+        binding.titleLabel = binding.titleLabel ?? (titleNode ? this.findLabelInNode(titleNode) : null);
+        binding.statusLabel = binding.statusLabel ?? (statusNode ? this.findLabelInNode(statusNode) : null);
+        binding.descriptionLabel = binding.descriptionLabel ?? (descriptionNode ? this.findLabelInNode(descriptionNode) : null);
+        binding.strategyLabel = binding.strategyLabel ?? (strategyNode ? this.findLabelInNode(strategyNode) : null);
+        binding.homeButton = binding.homeButton ?? this.findNodeByName(contentNode, 'HomeAction');
+        binding.gameButton = binding.gameButton ?? this.findNodeByName(contentNode, 'GameAction');
+        binding.resetButton = binding.resetButton ?? this.findNodeByName(contentNode, 'ResetCollectionAction');
+
+        this.hydrateCollectionDetailPanel(binding, binding.node);
+        this._detailDisplayHost = binding.iconDisplayHost;
+        console.log('[SceneNavButton] 图鉴详情面板已绑定', {
+            root: detailNode.name,
+            content: contentNode.name,
+            bindingNode: binding.node.name,
+            hasNamedTitleNode: !!titleNode,
+            hasNamedDescriptionNode: !!descriptionNode,
+            hasIconSprite: !!binding.iconSprite,
+            hasTitle: !!binding.titleLabel,
+            hasDescription: !!binding.descriptionLabel,
+        });
+        return binding;
+    }
+
+    private findDetailPanelBinding(detailNode: Node, contentNode: Node): CollectionDetailPanel {
+        const existingBinding = detailNode.getComponent(CollectionDetailPanel)
+            ?? detailNode.getComponentInChildren(CollectionDetailPanel)
+            ?? contentNode.getComponent(CollectionDetailPanel)
+            ?? contentNode.getComponentInChildren(CollectionDetailPanel);
+
+        if (existingBinding) {
+            return existingBinding;
+        }
+
+        return contentNode.addComponent(CollectionDetailPanel);
+    }
+
+    private resolveDetailPanelContentNode(detailNode: Node): Node {
+        const canvasNode = detailNode.getChildByName('Canvas');
+        if (!canvasNode) {
+            return detailNode;
+        }
+
+        detailNode.setPosition(0, 0, 0);
+        const detailTransform = detailNode.getComponent(UITransform) ?? detailNode.addComponent(UITransform);
+        detailTransform.setContentSize(660, 468);
+
+        canvasNode.setPosition(0, 0, 0);
+        const canvasTransform = canvasNode.getComponent(UITransform) ?? canvasNode.addComponent(UITransform);
+        canvasTransform.setContentSize(660, 468);
+
+        const cameraNode = canvasNode.getChildByName('Camera');
+        if (cameraNode) {
+            cameraNode.active = false;
+        }
+
+        console.log('[SceneNavButton] 检测到内嵌 Canvas 详情 prefab，已规范化到详情容器', detailNode.name);
+        return canvasNode;
+    }
+
+    private hydrateCollectionDetailPanel(binding: CollectionDetailPanel, detailNode: Node): void {
+        const rootTransform = detailNode.getComponent(UITransform) ?? detailNode.addComponent(UITransform);
+        rootTransform.setContentSize(660, 468);
+
+        if (detailNode.children.length === 0) {
+            const background = new Node('PanelBg');
+            background.layer = detailNode.layer;
+            background.addComponent(UITransform).setContentSize(660, 468);
+            const backgroundSprite = background.addComponent(Sprite);
+            backgroundSprite.color = this.colorFromHex('#1f2732');
+            detailNode.addChild(background);
+        }
+
+        if (!binding.iconSprite && !binding.iconLabel) {
+            const iconSpriteNode = new Node('DetailIconSprite');
+            iconSpriteNode.layer = detailNode.layer;
+            iconSpriteNode.setPosition(-248, 170, 0);
+            iconSpriteNode.addComponent(UITransform).setContentSize(88, 88);
+            binding.iconSprite = iconSpriteNode.addComponent(Sprite);
+            binding.iconSprite.node.active = false;
+            detailNode.addChild(iconSpriteNode);
+
+            const iconLabel = this.createLabel(detailNode, 'DetailIconLabel', '--', 38, '#ffcf70', new Vec3(-248, 170, 0), 96, 72, 0.5, 0.5);
+            iconLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+            iconLabel.verticalAlign = Label.VerticalAlign.CENTER;
+            iconLabel.isBold = true;
+            binding.iconLabel = iconLabel;
+        }
+
+        if (!binding.iconDisplayHost) {
+            const displayHost = new Node('DetailDisplayHost');
+            displayHost.layer = detailNode.layer;
+            displayHost.setPosition(-248, 170, -1);
+            displayHost.addComponent(UITransform).setContentSize(120, 120);
+            detailNode.addChild(displayHost);
+            binding.iconDisplayHost = displayHost;
+        }
+
+        if (!binding.titleLabel) {
+            binding.titleLabel = this.createLabel(detailNode, 'DetailTitle', '', 30, '#fff6d8', new Vec3(-88, 176, 0), 420, 44, 0, 0.5);
+            binding.titleLabel.isBold = true;
+        }
+
+        if (!binding.statusLabel) {
+            binding.statusLabel = this.createLabel(detailNode, 'DetailStatus', '', 16, '#8fd7d8', new Vec3(-88, 136, 0), 420, 26, 0, 0.5);
+        }
+
+        if (!binding.descriptionLabel) {
+            const label = this.createLabel(detailNode, 'DetailDescription', '', 18, '#d5dde4', new Vec3(-298, 84, 0), 596, 176);
+            label.overflow = Label.Overflow.RESIZE_HEIGHT;
+            label.enableWrapText = true;
+            binding.descriptionLabel = label;
+        }
+
+        if (!binding.strategyLabel) {
+            const label = this.createLabel(detailNode, 'DetailStrategy', '', 16, '#a5d8c6', new Vec3(-298, -82, 0), 596, 170);
+            label.overflow = Label.Overflow.RESIZE_HEIGHT;
+            label.enableWrapText = true;
+            binding.strategyLabel = label;
+        }
+
+        if (!binding.homeButton) {
+            const button = this.createPanel(detailNode, 'HomeAction', 180, 54, -156, -202, '#36576a', '#79f2de');
+            this.createLabel(button, 'HomeActionLabel', '返回主页', 20, '#f8f4e2', new Vec3(0, 0, 0), 180, 28, 0.5, 0.5);
+            binding.homeButton = button;
+        }
+
+        if (!binding.gameButton) {
+            const button = this.createPanel(detailNode, 'GameAction', 180, 54, 56, -202, '#725538', '#ffcf70');
+            this.createLabel(button, 'GameActionLabel', '开始狩猎', 20, '#fff7df', new Vec3(0, 0, 0), 180, 28, 0.5, 0.5);
+            binding.gameButton = button;
+        }
+
+        if (!binding.resetButton) {
+            const button = this.createPanel(detailNode, 'ResetCollectionAction', 180, 48, -50, -252, '#6f2f2f', '#ff9e7a');
+            this.createLabel(button, 'ResetCollectionActionLabel', '清空图鉴', 18, '#fff4df', new Vec3(0, 0, 0), 180, 24, 0.5, 0.5);
+            binding.resetButton = button;
+        }
+    }
+
+    private applyLayerRecursively(node: Node, layer: number): void {
+        node.layer = layer;
+        for (const child of node.children) {
+            this.applyLayerRecursively(child, layer);
+        }
+    }
+
+    private bringNodeToFront(node: Node | null): void {
+        if (!node?.parent) {
+            return;
+        }
+
+        node.setSiblingIndex(node.parent.children.length - 1);
+    }
+
+    private getCollectionVisualBinding(collectionId: string): CollectionCardVisualBinding | null {
+        const normalizedId = collectionId.trim();
+        for (const binding of this.collectionCardVisualBindings) {
+            if (binding.collectionId.trim() === normalizedId) {
+                return binding;
+            }
+        }
+        return null;
+    }
+
+    private getCollectionCardIcon(collectionId: string): SpriteFrame | null {
+        return this.getCollectionVisualBinding(collectionId)?.cardIcon ?? this.fallbackCollectionCardIcon;
+    }
+
+    private getCollectionDetailIcon(collectionId: string): SpriteFrame | null {
+        return this.getCollectionVisualBinding(collectionId)?.detailIcon
+            ?? this.getCollectionVisualBinding(collectionId)?.cardIcon
+            ?? this.fallbackCollectionDetailIcon
+            ?? this.fallbackCollectionCardIcon;
+    }
+
+    private getCollectionDetailDisplayPrefab(collectionId: string): Prefab | null {
+        return this.getCollectionVisualBinding(collectionId)?.detailDisplayPrefab ?? null;
+    }
+
     private renderCollectionImageCard(itemNode: Node, entry: CollectionEntrySnapshot, selected: boolean): void {
         const uiLayer = itemNode.layer;
         const rootLabel = itemNode.getComponent(Label) ?? this.findLabelInNode(itemNode);
@@ -410,31 +777,31 @@ export class SceneNavButton extends Component {
         backgroundGraphics.stroke();
         itemNode.addChild(backgroundNode);
 
-        const previewNode = new Node('Preview');
-    previewNode.layer = uiLayer;
-        previewNode.setPosition(0, 16, 0);
-        const previewTransform = previewNode.addComponent(UITransform);
-        previewTransform.setContentSize(292, 76);
-
-        if (this._collectionCardPreviewFrame) {
-            const previewSprite = previewNode.addComponent(Sprite);
-            previewSprite.spriteFrame = this._collectionCardPreviewFrame;
-            previewSprite.color = this.colorFromHex(entry.unlocked ? entry.definition.accent : '#8d9a8d');
+        const cardIconFrame = this.getCollectionCardIcon(entry.definition.id);
+        const iconNode = new Node('Icon');
+        iconNode.layer = uiLayer;
+        iconNode.setPosition(-124, 12, 0);
+        iconNode.addComponent(UITransform).setContentSize(72, 72);
+        if (cardIconFrame) {
+            const iconSprite = iconNode.addComponent(Sprite);
+            iconSprite.spriteFrame = cardIconFrame;
+            iconSprite.color = Color.WHITE.clone();
         } else {
-            const previewGraphics = previewNode.addComponent(Graphics);
-            previewGraphics.clear();
-            previewGraphics.fillColor = this.colorFromHex(entry.unlocked ? entry.definition.accent : '#8d9a8d');
-            previewGraphics.roundRect(-146, -38, 292, 76, 14);
-            previewGraphics.fill();
+            const iconLabel = iconNode.addComponent(Label);
+            iconLabel.string = entry.unlocked ? this.getCardSymbol(entry.definition.id) : '??';
+            iconLabel.fontSize = 22;
+            iconLabel.lineHeight = 28;
+            iconLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+            iconLabel.verticalAlign = Label.VerticalAlign.CENTER;
+            iconLabel.color = this.colorFromHex(entry.unlocked ? '#253028' : '#61727c');
         }
-
-        itemNode.addChild(previewNode);
+        itemNode.addChild(iconNode);
 
         const titleNode = new Node('Title');
     titleNode.layer = uiLayer;
-        titleNode.setPosition(-142, -28, 0);
+        titleNode.setPosition(-78, 4, 0);
         const titleTransform = titleNode.addComponent(UITransform);
-        titleTransform.setContentSize(190, 26);
+        titleTransform.setContentSize(240, 26);
         titleTransform.setAnchorPoint(0, 0.5);
         const titleLabel = titleNode.addComponent(Label);
         titleLabel.string = entry.unlocked ? entry.definition.name : '未解锁卡片';
@@ -446,9 +813,9 @@ export class SceneNavButton extends Component {
 
         const statusNode = new Node('Status');
     statusNode.layer = uiLayer;
-        statusNode.setPosition(-142, -52, 0);
+        statusNode.setPosition(-78, -24, 0);
         const statusTransform = statusNode.addComponent(UITransform);
-        statusTransform.setContentSize(180, 22);
+        statusTransform.setContentSize(240, 22);
         statusTransform.setAnchorPoint(0, 0.5);
         const statusLabel = statusNode.addComponent(Label);
         statusLabel.string = entry.definition.rarity === 'common'
@@ -482,17 +849,6 @@ export class SceneNavButton extends Component {
             : entry.unlocked ? '已完成' : '待解锁';
         const detailText = entry.unlocked ? entry.definition.shortDescription : this.getLockedHint(entry);
         return `${marker}${visualToken} ${title}\n${entry.definition.badge}  ${progressText}\n${detailText}`;
-    }
-
-    private resolveCollectionPreviewFrame(): SpriteFrame | null {
-        const sprites = this.node.getComponentsInChildren(Sprite);
-        for (const sprite of sprites) {
-            if (sprite.spriteFrame) {
-                return sprite.spriteFrame;
-            }
-        }
-
-        return null;
     }
 
     private findNodeByName(root: Node, name: string): Node | null {
@@ -562,20 +918,64 @@ export class SceneNavButton extends Component {
         listPanel.addChild(listContent);
         this._collectionList = listContent;
 
-        const detailPanel = this.createPanel(root, 'DetailPanel', 660, 468, 0, -370, '#1f2732', '#ffcf70');
-        this._detailIcon = this.createLabel(detailPanel, 'DetailIcon', '--', 38, '#ffcf70', new Vec3(-286, 174, 0), 86, 56);
-        this._detailTitle = this.createLabel(detailPanel, 'DetailTitle', '', 30, '#fff6d8', new Vec3(-220, 176, 0), 470, 40);
-        this._detailStatus = this.createLabel(detailPanel, 'DetailStatus', '', 16, '#8fd7d8', new Vec3(-220, 136, 0), 470, 26);
-        this._detailDescription = this.createLabel(detailPanel, 'DetailDescription', '', 18, '#d5dde4', new Vec3(-300, 84, 0), 600, 176);
-        this._detailStrategy = this.createLabel(detailPanel, 'DetailStrategy', '', 16, '#a5d8c6', new Vec3(-300, -82, 0), 600, 170);
+        const prefabDetailNode = this.instantiateCollectionDetailPanelPrefab(root.layer);
+        if (prefabDetailNode) {
+            const detailHost = new Node('DetailPanelHost');
+            detailHost.setPosition(0, -370, 0);
+            detailHost.addComponent(UITransform).setContentSize(660, 468);
+            root.addChild(detailHost);
+            this.bringNodeToFront(detailHost);
 
-        const homeButton = this.createPanel(detailPanel, 'HomeAction', 180, 54, -108, -184, '#36576a', '#79f2de');
-        this.createLabel(homeButton, 'HomeActionLabel', '返回主页', 20, '#f8f4e2', new Vec3(0, 0, 0), 180, 28, 0.5, 0.5);
-        homeButton.on(Node.EventType.TOUCH_END, () => this.goHome(), this);
+            detailHost.addChild(prefabDetailNode);
+            prefabDetailNode.setPosition(0, 0, 0);
 
-        const gameButton = this.createPanel(detailPanel, 'GameAction', 180, 54, 108, -184, '#725538', '#ffcf70');
-        this.createLabel(gameButton, 'GameActionLabel', '开始狩猎', 20, '#fff7df', new Vec3(0, 0, 0), 180, 28, 0.5, 0.5);
-        gameButton.on(Node.EventType.TOUCH_END, () => this.goGame(), this);
+            this._detailPanelNode = prefabDetailNode;
+            this._detailPanelBinding = this.prepareCollectionDetailPanel(prefabDetailNode);
+            this._detailPanelBinding?.bindActions(
+                () => this.goHome(),
+                () => this.goGame(),
+                () => this.resetCollectionProgress(),
+                this,
+            );
+        } else {
+            const detailPanel = this.createPanel(root, 'DetailPanel', 660, 468, 0, -370, '#1f2732', '#ffcf70');
+            const detailIconNode = new Node('DetailIconSprite');
+            detailIconNode.setPosition(-286, 174, 0);
+            detailIconNode.addComponent(UITransform).setContentSize(72, 72);
+            this._detailIconSprite = detailIconNode.addComponent(Sprite);
+            this._detailIconSprite.node.active = false;
+            detailPanel.addChild(detailIconNode);
+            this._detailIcon = this.createLabel(detailPanel, 'DetailIcon', '--', 38, '#ffcf70', new Vec3(-286, 174, 0), 86, 56);
+            this._detailTitle = this.createLabel(detailPanel, 'DetailTitle', '', 30, '#fff6d8', new Vec3(-220, 176, 0), 470, 40);
+            this._detailStatus = this.createLabel(detailPanel, 'DetailStatus', '', 16, '#8fd7d8', new Vec3(-220, 136, 0), 470, 26);
+            this._detailDescription = this.createLabel(detailPanel, 'DetailDescription', '', 18, '#d5dde4', new Vec3(-300, 84, 0), 600, 176);
+            this._detailStrategy = this.createLabel(detailPanel, 'DetailStrategy', '', 16, '#a5d8c6', new Vec3(-300, -82, 0), 600, 170);
+
+            const homeButton = this.createPanel(detailPanel, 'HomeAction', 180, 54, -108, -184, '#36576a', '#79f2de');
+            this.createLabel(homeButton, 'HomeActionLabel', '返回主页', 20, '#f8f4e2', new Vec3(0, 0, 0), 180, 28, 0.5, 0.5);
+            homeButton.on(Node.EventType.TOUCH_END, () => this.goHome(), this);
+
+            const gameButton = this.createPanel(detailPanel, 'GameAction', 180, 54, 108, -184, '#725538', '#ffcf70');
+            this.createLabel(gameButton, 'GameActionLabel', '开始狩猎', 20, '#fff7df', new Vec3(0, 0, 0), 180, 28, 0.5, 0.5);
+            gameButton.on(Node.EventType.TOUCH_END, () => this.goGame(), this);
+
+            const resetButton = this.createPanel(detailPanel, 'ResetCollectionAction', 180, 48, 0, -246, '#6f2f2f', '#ff9e7a');
+            this.createLabel(resetButton, 'ResetCollectionActionLabel', '清空图鉴', 18, '#fff4df', new Vec3(0, 0, 0), 180, 24, 0.5, 0.5);
+            resetButton.on(Node.EventType.TOUCH_END, () => this.resetCollectionProgress(), this);
+        }
+
+        this.refreshCollectionView();
+    }
+
+    private resetCollectionProgress(): void {
+        CollectionSystem.debugResetAll();
+        this._selectedCollectionId = '';
+        this.setDetailPanelVisibility(false);
+
+        if (this._existingCollectionBound) {
+            this.refreshExistingCollectionView();
+            return;
+        }
 
         this.refreshCollectionView();
     }
@@ -583,11 +983,12 @@ export class SceneNavButton extends Component {
     private refreshCollectionView(): void {
         const entries = CollectionSystem.getAllSnapshots();
         if (entries.length <= 0 || !this._collectionList) {
+            this.setDetailPanelVisibility(false);
             return;
         }
 
         if (!entries.some(entry => entry.definition.id === this._selectedCollectionId)) {
-            this._selectedCollectionId = entries[0].definition.id;
+            this._selectedCollectionId = '';
         }
 
         this._collectionList.removeAllChildren();
@@ -600,7 +1001,12 @@ export class SceneNavButton extends Component {
             this._summaryLabel.string = `已收藏 ${overview.unlockedCount}/${overview.totalCount}   稀有 ${overview.rareUnlockedCount}/${overview.rareTotalCount}   普通怪靠累计击杀，Boss 与稀有目标击败一次即收录`;
         }
 
-        const selected = entries.find(entry => entry.definition.id === this._selectedCollectionId) ?? entries[0];
+        const selected = entries.find(entry => entry.definition.id === this._selectedCollectionId) ?? null;
+        if (!selected) {
+            this.setDetailPanelVisibility(false);
+            return;
+        }
+
         this.updateDetailPanel(selected);
     }
 
@@ -614,8 +1020,19 @@ export class SceneNavButton extends Component {
         const panel = this.drawPanel(node, 600, 54, fill, stroke);
         panel.lineWidth = isSelected ? 3 : 2;
 
-        const symbolText = entry.unlocked ? this.getCardSymbol(entry.definition.id) : '??';
-        this.createLabel(node, 'Symbol', symbolText, 22, entry.unlocked ? entry.definition.accent : '#61727c', new Vec3(-268, 0, 0), 52, 32, 0.5, 0.5);
+        const cardIconFrame = this.getCollectionCardIcon(entry.definition.id);
+        if (cardIconFrame) {
+            const iconNode = new Node('SymbolIcon');
+            iconNode.setPosition(-268, 0, 0);
+            iconNode.addComponent(UITransform).setContentSize(42, 42);
+            const iconSprite = iconNode.addComponent(Sprite);
+            iconSprite.spriteFrame = cardIconFrame;
+            iconSprite.color = Color.WHITE.clone();
+            node.addChild(iconNode);
+        } else {
+            const symbolText = entry.unlocked ? this.getCardSymbol(entry.definition.id) : '??';
+            this.createLabel(node, 'Symbol', symbolText, 22, entry.unlocked ? entry.definition.accent : '#61727c', new Vec3(-268, 0, 0), 52, 32, 0.5, 0.5);
+        }
 
         const title = entry.unlocked ? entry.definition.name : '未解锁卡片';
         this.createLabel(node, 'Title', title, 20, '#fff4cf', new Vec3(-228, 11, 0), 300, 26);
@@ -629,6 +1046,7 @@ export class SceneNavButton extends Component {
         this.createLabel(node, 'Progress', progressText, 13, '#9ae1d2', new Vec3(264, -12, 0), 120, 20, 1, 1);
 
         node.on(Node.EventType.TOUCH_END, () => {
+            console.log('[SceneNavButton] 点击图鉴卡片(运行时布局)', entry.definition.id, entry.definition.name);
             this._selectedCollectionId = entry.definition.id;
             CollectionSystem.markSeen(entry.definition.id);
             this.refreshCollectionView();
@@ -637,11 +1055,52 @@ export class SceneNavButton extends Component {
     }
 
     private updateDetailPanel(entry: CollectionEntrySnapshot): void {
+        console.log('[SceneNavButton] 刷新图鉴详情', entry.definition.id, entry.definition.name, {
+            unlocked: entry.unlocked,
+            hostActive: this._detailPanelNode?.parent?.active ?? null,
+            panelActive: this._detailPanelNode?.active ?? null,
+        });
         CollectionSystem.markSeen(entry.definition.id);
+        this.setDetailPanelVisibility(true);
+        this.bringNodeToFront(this._detailPanelNode?.parent ?? this._detailPanelNode);
+
+        const detailIcon = this.getCollectionDetailIcon(entry.definition.id);
+        const detailDisplayPrefab = entry.unlocked ? this.getCollectionDetailDisplayPrefab(entry.definition.id) : null;
+        const accentColor = this.colorFromHex(entry.unlocked ? entry.definition.accent : '#6f7f88');
+        const lockedHint = this.getLockedHint(entry);
+        const lockedCondition = this.getLockedCondition(entry);
+
+        this.refreshDetailDisplayPrefab(detailDisplayPrefab);
+
+        if (this._detailPanelBinding) {
+            if (this._detailPanelBinding.iconSprite) {
+                this._detailPanelBinding.iconSprite.node.active = !detailDisplayPrefab && !!detailIcon;
+            }
+
+            if (this._detailPanelBinding.iconLabel) {
+                this._detailPanelBinding.iconLabel.node.active = !detailDisplayPrefab && !detailIcon;
+            }
+
+            this._detailPanelBinding.render(
+                entry,
+                detailDisplayPrefab ? null : detailIcon,
+                this.getCardSymbol(entry.definition.id),
+                lockedHint,
+                lockedCondition,
+                accentColor,
+            );
+            return;
+        }
+
+        if (this._detailIconSprite) {
+            this._detailIconSprite.spriteFrame = detailIcon;
+            this._detailIconSprite.node.active = !detailDisplayPrefab && !!detailIcon;
+        }
 
         if (this._detailIcon) {
             this._detailIcon.string = entry.unlocked ? this.getCardSymbol(entry.definition.id) : '??';
-            this._detailIcon.color = this.colorFromHex(entry.unlocked ? entry.definition.accent : '#6f7f88');
+            this._detailIcon.color = accentColor;
+            this._detailIcon.node.active = !detailDisplayPrefab && !detailIcon;
         }
 
         if (this._detailTitle) {
@@ -650,19 +1109,62 @@ export class SceneNavButton extends Component {
 
         if (this._detailStatus) {
             this._detailStatus.string = entry.unlocked
-                ? `${entry.definition.badge}  已收藏` : `${entry.definition.badge}  ${this.getLockedHint(entry)}`;
+                ? `${entry.definition.badge}  已收藏` : `${entry.definition.badge}  ${lockedHint}`;
         }
 
         if (this._detailDescription) {
             this._detailDescription.string = entry.unlocked
                 ? `${entry.definition.shortDescription}\n\n${entry.definition.details}`
-                : `尚未解锁该卡片。\n\n${this.getLockedHint(entry)}\n\n解锁后将显示完整描述与详情。`;
+                : `尚未解锁该卡片。\n\n${lockedHint}\n\n解锁后将显示完整描述与详情。`;
         }
 
         if (this._detailStrategy) {
             this._detailStrategy.string = entry.unlocked
                 ? `搜集策略\n${entry.definition.strategy}`
-                : `解锁条件\n${this.getLockedCondition(entry)}`;
+                : `解锁条件\n${lockedCondition}`;
+        }
+    }
+
+    private refreshDetailDisplayPrefab(displayPrefab: Prefab | null): void {
+        const host = this._detailPanelBinding?.iconDisplayHost ?? this._detailDisplayHost;
+        if (!host) {
+            return;
+        }
+
+        const currentName = this._detailDisplayInstance?.name ?? '';
+        const nextName = displayPrefab?.data?.name ?? '';
+        if (this._detailDisplayInstance && displayPrefab && currentName === nextName) {
+            this._detailDisplayInstance.active = true;
+            return;
+        }
+
+        if (this._detailDisplayInstance) {
+            this._detailDisplayInstance.destroy();
+            this._detailDisplayInstance = null;
+        }
+
+        if (!displayPrefab) {
+            return;
+        }
+
+        try {
+            const instance = instantiate(displayPrefab);
+            this.applyLayerRecursively(instance, host.layer);
+            instance.setPosition(0, 0, 0);
+            host.addChild(instance);
+            this._detailDisplayInstance = instance;
+        } catch (error) {
+            console.warn('[SceneNavButton] 图鉴详情动画 prefab 实例化失败，已回退静态图标', error);
+        }
+    }
+
+    private setDetailPanelVisibility(visible: boolean): void {
+        if (this._detailPanelNode?.parent) {
+            this._detailPanelNode.parent.active = visible;
+        }
+
+        if (this._detailPanelNode) {
+            this._detailPanelNode.active = visible;
         }
     }
 

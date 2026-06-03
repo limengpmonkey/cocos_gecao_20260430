@@ -97,6 +97,9 @@ export class Player extends cObject {
     @property({ tooltip: "身体接触伤害冷却（秒）" })
     contactDamageCooldown: number = 0.5;
 
+    @property({ type: CCInteger, tooltip: "身体接触普通敌人时的单次伤害" })
+    contactDamagePerHit: number = 24;
+
     private _contactDamageCooldownLeft: number = 0;
     
     /** 当前玩家状态 */
@@ -874,7 +877,12 @@ export class Player extends cObject {
         
         switch (b.group) {
             case this.ENEMYGROUP:
-                // 玩家身体与敌人本体接触时不再直接受伤。
+                if (this._contactDamageCooldownLeft > 0) {
+                    break;
+                }
+
+                this._contactDamageCooldownLeft = Math.max(0.05, this.contactDamageCooldown);
+                this.takeDamage(Math.max(1, this.contactDamagePerHit), b.object?.node);
                 break;
                 
             // case BULLET_GROUP:

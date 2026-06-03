@@ -244,6 +244,33 @@ export class BulletHell extends Component {
     @property({ type: CCInteger, group: 'Collection Config', tooltip: '同屏稀有收藏敌人上限' })
     rareMaxAlive: number = 1;
 
+    @property({ group: 'Collection Config', tooltip: '启用第一关限时收藏挑战（15-30 秒预警后出现一次巨型收藏怪）' })
+    stageOneTimedCollectionChallengeEnabled: boolean = true;
+
+    @property({ group: 'Collection Config', tooltip: '调试：第一关限时收藏挑战固定出现，不走随机时间/随机目标' })
+    debugForceStageOneTimedCollectionChallenge: boolean = false;
+
+    @property({ group: 'Collection Config', tooltip: '第一关限时收藏挑战最早出现时间（秒）' })
+    stageOneTimedCollectionChallengeStartTime: number = 15;
+
+    @property({ group: 'Collection Config', tooltip: '第一关限时收藏挑战最晚出现时间（秒）' })
+    stageOneTimedCollectionChallengeEndTime: number = 30;
+
+    @property({ group: 'Collection Config', tooltip: '第一关限时收藏挑战预警时长（秒）' })
+    stageOneTimedCollectionWarningLeadTime: number = 2.6;
+
+    @property({ group: 'Collection Config', tooltip: '第一关限时收藏挑战出现后的可击败时长（秒）' })
+    stageOneTimedCollectionDuration: number = 12;
+
+    @property({ group: 'Collection Config', tooltip: '第一关限时收藏挑战目标的额外血量倍率（叠加当前关卡压力）' })
+    stageOneTimedCollectionHpMultiplier: number = 2.8;
+
+    @property({ group: 'Collection Config', tooltip: '第一关限时收藏挑战目标的额外移速倍率（叠加当前关卡压力）' })
+    stageOneTimedCollectionSpeedMultiplier: number = 1.06;
+
+    @property({ group: 'Collection Config', tooltip: '第一关限时收藏挑战目标的体型放大倍率' })
+    stageOneTimedCollectionScaleMultiplier: number = 1.85;
+
     //自行扩展控制策略
     //....
 
@@ -280,6 +307,18 @@ export class BulletHell extends Component {
     private _isPlayerDefeated = false;
     private _gameOverOverlay: Node = null;
     private _gameOverStatsLabel: Label = null;
+    private _stageOneTimedCollectionSpawnTime = -1;
+    private _stageOneTimedCollectionWarningShown = false;
+    private _stageOneTimedCollectionResolved = false;
+    private _stageOneTimedCollectionEnemy: Enemy | null = null;
+    private _stageOneTimedCollectionDefinition: CollectionDefinition | null = null;
+    private _stageOneTimedCollectionDeadline = -1;
+    private _stageOneTimedCollectionOverlay: Node = null;
+    private _stageOneTimedCollectionMessageLabel: Label = null;
+    private _stageOneTimedCollectionTimerLabel: Label = null;
+    private _stageOneTimedCollectionEdgeHintNode: Node = null;
+    private _stageOneTimedCollectionEdgeHintGraphics: Graphics = null;
+    private _stageOneTimedCollectionEdgeHintLabel: Label = null;
 
     static get inst() {
         return this._inst;
@@ -292,6 +331,7 @@ export class BulletHell extends Component {
 
     onDestroy(): void {
         this.detachPlayerDeathListener();
+        this.resetStageOneTimedCollectionChallenge();
 
         Enemy.off(EnemyEvents.ON_KILLED, this.onEnemyKilled, this);
 
@@ -466,6 +506,10 @@ export class BulletHell extends Component {
             }
         }
 
+        if (this.isStageOneTimedCollectionKey(data.collectionKey)) {
+            this.onStageOneTimedCollectionResolved(data.killedByPlayer, data.collectionDisplayName || data.enemyNode?.name || '限时收藏目标');
+        }
+
         if (data.isBoss) {
             this._bossAlive = false;
             this.onBossDefeated();
@@ -519,11 +563,408 @@ export class BulletHell extends Component {
         if (ExperienceSystem.inst) {
             ExperienceSystem.inst.configureExpCurve(table?.expCurve ?? []);
         }
+
+        this.resetStageOneTimedCollectionChallenge();
+        this.planStageOneTimedCollectionChallenge();
     }
 
     private getCurrentPressureSample() {
         const table = this.getCurrentBalanceTable();
         return samplePressureAtTime(table?.pressureCurve ?? [], this._stageElapsedTime);
+    }
+
+    private isStageOneTimedCollectionKey(collectionKey: string): boolean {
+        return collectionKey === 'stage1_can_champion' || collectionKey === 'stage1_boxer_brute';
+    }
+
+    private planStageOneTimedCollectionChallenge(): void {
+        this._stageOneTimedCollectionSpawnTime = -1;
+        this._stageOneTimedCollectionWarningShown = false;
+        this._stageOneTimedCollectionResolved = false;
+        this._stageOneTimedCollectionDeadline = -1;
+        this._stageOneTimedCollectionEnemy = null;
+        this._stageOneTimedCollectionDefinition = null;
+        this.hideStageOneTimedCollectionOverlay();
+
+        if (!this.stageOneTimedCollectionChallengeEnabled || this._currentStageIndex !== 0) {
+            return;
+        }
+
+        const candidates = CollectionSystem.getPreferredStageOneTimedDefinitions();
+        if (candidates.length <= 0) {
+            return;
+        }
+
+        const startTime = Math.max(1, this.stageOneTimedCollectionChallengeStartTime);
+        const endTime = Math.max(startTime, this.stageOneTimedCollectionChallengeEndTime);
+
+        if (this.debugForceStageOneTimedCollectionChallenge) {
+            this._stageOneTimedCollectionDefinition = candidates[0] ?? null;
+            this._stageOneTimedCollectionSpawnTime = startTime;
+            return;
+        }
+
+        const randomIndex = Math.floor(Math.random() * candidates.length);
+        this._stageOneTimedCollectionDefinition = candidates[randomIndex] ?? candidates[0] ?? null;
+        this._stageOneTimedCollectionSpawnTime = startTime + Math.random() * (endTime - startTime);
+    }
+
+    private updateStageOneTimedCollectionChallenge(): void {
+        if (this._currentStageIndex !== 0 || this._isGameCleared || this._bossFightActive) {
+            this.hideStageOneTimedCollectionOverlay();
+            this.hideStageOneTimedCollectionEdgeHint();
+            return;
+        }
+
+        if (!this._stageOneTimedCollectionDefinition || this._stageOneTimedCollectionResolved) {
+            this.hideStageOneTimedCollectionEdgeHint();
+            return;
+        }
+
+        const warningStartTime = Math.max(0, this._stageOneTimedCollectionSpawnTime - Math.max(0.2, this.stageOneTimedCollectionWarningLeadTime));
+        if (!this._stageOneTimedCollectionWarningShown && this._stageElapsedTime >= warningStartTime) {
+            this._stageOneTimedCollectionWarningShown = true;
+            const leadTime = Math.max(0, this._stageOneTimedCollectionSpawnTime - this._stageElapsedTime);
+            this.showStageOneTimedCollectionWarning(this._stageOneTimedCollectionDefinition, leadTime);
+        }
+
+        if (!this._stageOneTimedCollectionEnemy && this._stageElapsedTime >= this._stageOneTimedCollectionSpawnTime) {
+            this.spawnStageOneTimedCollectionEnemy();
+        }
+
+        if (!this._stageOneTimedCollectionEnemy) {
+            this.hideStageOneTimedCollectionEdgeHint();
+            return;
+        }
+
+        const remaining = this._stageOneTimedCollectionDeadline - this._stageElapsedTime;
+        if (remaining <= 0) {
+            this.failStageOneTimedCollectionChallenge();
+            return;
+        }
+
+        this.showStageOneTimedCollectionCountdown(this._stageOneTimedCollectionDefinition, remaining);
+        this.updateStageOneTimedCollectionEdgeHint(this._stageOneTimedCollectionDefinition);
+    }
+
+    private showStageOneTimedCollectionWarning(definition: CollectionDefinition, leadTime: number): void {
+        const overlay = this.ensureStageOneTimedCollectionOverlay();
+        if (!overlay || !this._stageOneTimedCollectionMessageLabel || !this._stageOneTimedCollectionTimerLabel) {
+            return;
+        }
+
+        this._stageOneTimedCollectionMessageLabel.string = `预警：${definition.name} 即将出现`;
+        this._stageOneTimedCollectionTimerLabel.string = `${Math.max(0, leadTime).toFixed(1)} 秒后登场`;
+        this._stageOneTimedCollectionMessageLabel.color = new Color(255, 238, 188, 255);
+        this._stageOneTimedCollectionTimerLabel.color = new Color(255, 208, 122, 255);
+        overlay.active = true;
+    }
+
+    private showStageOneTimedCollectionCountdown(definition: CollectionDefinition, remaining: number): void {
+        const overlay = this.ensureStageOneTimedCollectionOverlay();
+        if (!overlay || !this._stageOneTimedCollectionMessageLabel || !this._stageOneTimedCollectionTimerLabel) {
+            return;
+        }
+
+        this._stageOneTimedCollectionMessageLabel.string = `限时收藏目标：${definition.name}`;
+        this._stageOneTimedCollectionTimerLabel.string = `剩余 ${Math.max(0, remaining).toFixed(1)} 秒`;
+        this._stageOneTimedCollectionMessageLabel.color = new Color(255, 246, 218, 255);
+        this._stageOneTimedCollectionTimerLabel.color = remaining <= 3
+            ? new Color(255, 124, 124, 255)
+            : new Color(255, 215, 120, 255);
+        overlay.active = true;
+    }
+
+    private hideStageOneTimedCollectionOverlay(): void {
+        if (this._stageOneTimedCollectionOverlay) {
+            this._stageOneTimedCollectionOverlay.active = false;
+        }
+    }
+
+    private hideStageOneTimedCollectionEdgeHint(): void {
+        if (this._stageOneTimedCollectionEdgeHintNode) {
+            this._stageOneTimedCollectionEdgeHintNode.active = false;
+        }
+    }
+
+    private ensureStageOneTimedCollectionOverlay(): Node | null {
+        if (this._stageOneTimedCollectionOverlay && this._stageOneTimedCollectionMessageLabel && this._stageOneTimedCollectionTimerLabel) {
+            return this._stageOneTimedCollectionOverlay;
+        }
+
+        const parent = director.getScene()?.getChildByName('Canvas') ?? this.node;
+        if (!parent) {
+            return null;
+        }
+
+        const visibleSize = view.getVisibleSize();
+        const overlay = new Node('StageOneTimedCollectionOverlay');
+        overlay.layer = parent.layer;
+        const overlayTransform = overlay.addComponent(UITransform);
+        overlayTransform.setContentSize(480, 112);
+        overlay.setPosition(0, visibleSize.height * 0.5 - 108, 0);
+        parent.addChild(overlay);
+        overlay.setSiblingIndex(parent.children.length - 1);
+
+        const panel = new Node('Panel');
+        panel.layer = parent.layer;
+        const panelTransform = panel.addComponent(UITransform);
+        panelTransform.setContentSize(480, 112);
+        const panelGraphics = panel.addComponent(Graphics);
+        panelGraphics.fillColor = new Color(22, 26, 38, 210);
+        panelGraphics.roundRect(-240, -56, 480, 112, 18);
+        panelGraphics.fill();
+        panelGraphics.lineWidth = 3;
+        panelGraphics.strokeColor = new Color(255, 204, 110, 196);
+        panelGraphics.roundRect(-240, -56, 480, 112, 18);
+        panelGraphics.stroke();
+        overlay.addChild(panel);
+
+        const messageNode = new Node('Message');
+        messageNode.layer = parent.layer;
+        const messageTransform = messageNode.addComponent(UITransform);
+        messageTransform.setContentSize(420, 44);
+        const messageLabel = messageNode.addComponent(Label);
+        messageLabel.fontSize = 24;
+        messageLabel.lineHeight = 32;
+        messageLabel.color = new Color(255, 240, 210, 255);
+        messageNode.setPosition(0, 16, 0);
+        panel.addChild(messageNode);
+
+        const timerNode = new Node('Timer');
+        timerNode.layer = parent.layer;
+        const timerTransform = timerNode.addComponent(UITransform);
+        timerTransform.setContentSize(420, 34);
+        const timerLabel = timerNode.addComponent(Label);
+        timerLabel.fontSize = 22;
+        timerLabel.lineHeight = 28;
+        timerLabel.color = new Color(255, 214, 134, 255);
+        timerNode.setPosition(0, -18, 0);
+        panel.addChild(timerNode);
+
+        this._stageOneTimedCollectionOverlay = overlay;
+        this._stageOneTimedCollectionMessageLabel = messageLabel;
+        this._stageOneTimedCollectionTimerLabel = timerLabel;
+        this._stageOneTimedCollectionOverlay.active = false;
+        return this._stageOneTimedCollectionOverlay;
+    }
+
+    private ensureStageOneTimedCollectionEdgeHint(): Node | null {
+        if (this._stageOneTimedCollectionEdgeHintNode && this._stageOneTimedCollectionEdgeHintGraphics && this._stageOneTimedCollectionEdgeHintLabel) {
+            return this._stageOneTimedCollectionEdgeHintNode;
+        }
+
+        const parent = director.getScene()?.getChildByName('Canvas') ?? this.node;
+        if (!parent) {
+            return null;
+        }
+
+        const visibleSize = view.getVisibleSize();
+        const hintNode = new Node('StageOneTimedCollectionEdgeHint');
+        hintNode.layer = parent.layer;
+        hintNode.addComponent(UITransform).setContentSize(180, 84);
+        hintNode.setPosition(0, visibleSize.height * 0.5 - 160, 0);
+        parent.addChild(hintNode);
+        hintNode.setSiblingIndex(parent.children.length - 1);
+
+        const markerNode = new Node('Marker');
+        markerNode.layer = parent.layer;
+        markerNode.addComponent(UITransform).setContentSize(72, 72);
+        const markerGraphics = markerNode.addComponent(Graphics);
+        hintNode.addChild(markerNode);
+
+        const labelNode = new Node('Label');
+        labelNode.layer = parent.layer;
+        labelNode.addComponent(UITransform).setContentSize(180, 32);
+        labelNode.setPosition(0, -36, 0);
+        const label = labelNode.addComponent(Label);
+        label.fontSize = 18;
+        label.lineHeight = 24;
+        label.color = new Color(255, 232, 188, 255);
+        hintNode.addChild(labelNode);
+
+        this._stageOneTimedCollectionEdgeHintNode = hintNode;
+        this._stageOneTimedCollectionEdgeHintGraphics = markerGraphics;
+        this._stageOneTimedCollectionEdgeHintLabel = label;
+        this._stageOneTimedCollectionEdgeHintNode.active = false;
+        return this._stageOneTimedCollectionEdgeHintNode;
+    }
+
+    private updateStageOneTimedCollectionEdgeHint(definition: CollectionDefinition): void {
+        const enemy = this._stageOneTimedCollectionEnemy;
+        if (!enemy || !enemy.node || !enemy.node.isValid) {
+            this.hideStageOneTimedCollectionEdgeHint();
+            return;
+        }
+
+        const hintNode = this.ensureStageOneTimedCollectionEdgeHint();
+        if (!hintNode || !this._stageOneTimedCollectionEdgeHintGraphics || !this._stageOneTimedCollectionEdgeHintLabel) {
+            return;
+        }
+
+        const parent = hintNode.parent;
+        const parentTransform = parent?.getComponent(UITransform);
+        if (!parent || !parentTransform) {
+            this.hideStageOneTimedCollectionEdgeHint();
+            return;
+        }
+
+        const visibleSize = view.getVisibleSize();
+        const localPos = parentTransform.convertToNodeSpaceAR(enemy.node.worldPosition);
+        const margin = 72;
+        const halfW = visibleSize.width * 0.5 - margin;
+        const halfH = visibleSize.height * 0.5 - margin;
+        const isOffscreen = Math.abs(localPos.x) > halfW || Math.abs(localPos.y) > halfH;
+        if (!isOffscreen) {
+            this.hideStageOneTimedCollectionEdgeHint();
+            return;
+        }
+
+        const clampedX = Math.max(-halfW, Math.min(halfW, localPos.x));
+        const clampedY = Math.max(-halfH, Math.min(halfH, localPos.y));
+        hintNode.setPosition(clampedX, clampedY, 0);
+        hintNode.active = true;
+
+        const dx = localPos.x - clampedX;
+        const dy = localPos.y - clampedY;
+        const length = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+        const dirX = dx / length;
+        const dirY = dy / length;
+        const sideX = -dirY;
+        const sideY = dirX;
+
+        const g = this._stageOneTimedCollectionEdgeHintGraphics;
+        g.clear();
+        g.lineWidth = 4;
+        g.fillColor = new Color(124, 24, 24, 98);
+        g.strokeColor = new Color(255, 214, 102, 255);
+        g.circle(0, 0, 18);
+        g.fill();
+        g.stroke();
+
+        const tipX = dirX * 28;
+        const tipY = dirY * 28;
+        const baseX = dirX * 11;
+        const baseY = dirY * 11;
+        g.moveTo(tipX, tipY);
+        g.lineTo(baseX + sideX * 9, baseY + sideY * 9);
+        g.lineTo(baseX - sideX * 9, baseY - sideY * 9);
+        g.close();
+        g.fill();
+        g.stroke();
+
+        const shortName = definition.id === 'stage1_boxer_brute' ? '纸箱目标' : '收藏目标';
+        this._stageOneTimedCollectionEdgeHintLabel.string = shortName;
+    }
+
+    private getStageOneTimedCollectionSpawnConfig(definition: CollectionDefinition): { kind: EnemyKind; prefab: Prefab | null } {
+        if (definition.id === 'stage1_boxer_brute') {
+            return {
+                kind: EnemyKind.SnailTail,
+                prefab: this.snailTail,
+            };
+        }
+
+        return {
+            kind: EnemyKind.Ghost,
+            prefab: this.ghost,
+        };
+    }
+
+    private spawnStageOneTimedCollectionEnemy(): void {
+        const definition = this._stageOneTimedCollectionDefinition;
+        if (!definition || !this.objects || this._stageOneTimedCollectionEnemy) {
+            return;
+        }
+
+        const { kind, prefab } = this.getStageOneTimedCollectionSpawnConfig(definition);
+        const enemy = prefab ? this.getEnemyFromPrefab(kind, prefab) : null;
+        if (!enemy) {
+            console.warn(`[Collection] 第一关限时收藏挑战生成失败：${definition.name}`);
+            this._stageOneTimedCollectionResolved = true;
+            this.hideStageOneTimedCollectionOverlay();
+            return;
+        }
+
+        const pressure = this.getCurrentPressureSample();
+        enemy.setBossMode(false);
+        enemy.setEliteMode(false, EliteSkillType.Dash);
+        enemy.resetCollectionMetadata();
+        enemy.setCollectionMetadata(definition.id, definition.name, true);
+        enemy.setDifficultyScaling(
+            pressure.normalHpMul * Math.max(1.2, this.stageOneTimedCollectionHpMultiplier),
+            pressure.normalSpeedMul * Math.max(0.8, this.stageOneTimedCollectionSpeedMultiplier),
+            3.2,
+            3.8,
+        );
+        enemy.insert(this.objects);
+
+        const { minRadius, maxRadius } = this.getRegularSpawnRadiusRange();
+        this.getSpawnPosition(tempPos, minRadius, maxRadius);
+        enemy.setPosition(tempPos);
+        enemy.init();
+        enemy.setCustomVisualScaleMultiplier(this.stageOneTimedCollectionScaleMultiplier);
+
+        this._stageOneTimedCollectionEnemy = enemy;
+        this._stageOneTimedCollectionDeadline = this._stageElapsedTime + Math.max(3, this.stageOneTimedCollectionDuration);
+        this.showStageOneTimedCollectionCountdown(definition, this._stageOneTimedCollectionDeadline - this._stageElapsedTime);
+
+        console.log(`[Collection] 第一关限时收藏目标出现：${definition.name}，限时 ${Math.max(3, this.stageOneTimedCollectionDuration).toFixed(1)} 秒`);
+    }
+
+    private despawnEnemyImmediately(enemy: Enemy | null): void {
+        if (!enemy || !enemy.node || !enemy.node.isValid) {
+            return;
+        }
+
+        const recycle = (enemy.constructor as any).put;
+        if (typeof recycle === 'function') {
+            recycle.call(enemy.constructor, enemy);
+            return;
+        }
+
+        enemy.node.destroy();
+    }
+
+    private failStageOneTimedCollectionChallenge(): void {
+        const definition = this._stageOneTimedCollectionDefinition;
+        this.despawnEnemyImmediately(this._stageOneTimedCollectionEnemy);
+        this._stageOneTimedCollectionEnemy = null;
+        this._stageOneTimedCollectionResolved = true;
+        this._stageOneTimedCollectionDeadline = -1;
+        this.hideStageOneTimedCollectionOverlay();
+        this.hideStageOneTimedCollectionEdgeHint();
+
+        if (definition) {
+            console.log(`[Collection] 第一关限时收藏目标超时撤离：${definition.name}`);
+        }
+    }
+
+    private onStageOneTimedCollectionResolved(killedByPlayer: boolean, displayName: string): void {
+        this._stageOneTimedCollectionEnemy = null;
+        this._stageOneTimedCollectionResolved = true;
+        this._stageOneTimedCollectionDeadline = -1;
+        this.hideStageOneTimedCollectionOverlay();
+        this.hideStageOneTimedCollectionEdgeHint();
+
+        if (killedByPlayer) {
+            console.log(`[Collection] 第一关限时收藏挑战完成：${displayName}`);
+        }
+    }
+
+    private resetStageOneTimedCollectionChallenge(resetOverlayText: boolean = true): void {
+        this.despawnEnemyImmediately(this._stageOneTimedCollectionEnemy);
+        this._stageOneTimedCollectionEnemy = null;
+        this._stageOneTimedCollectionSpawnTime = -1;
+        this._stageOneTimedCollectionWarningShown = false;
+        this._stageOneTimedCollectionResolved = false;
+        this._stageOneTimedCollectionDefinition = null;
+        this._stageOneTimedCollectionDeadline = -1;
+
+        if (resetOverlayText) {
+            this.hideStageOneTimedCollectionOverlay();
+            this.hideStageOneTimedCollectionEdgeHint();
+        }
     }
 
     private canUnlockBoss(): boolean {
@@ -1415,6 +1856,8 @@ export class BulletHell extends Component {
         if (!this._isGameCleared && !this._bossFightActive) {
             this._stageElapsedTime += dt;
         }
+
+        this.updateStageOneTimedCollectionChallenge();
 
         const table = this.getCurrentBalanceTable();
         const elite = table?.elite;

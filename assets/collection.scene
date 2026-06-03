@@ -26,7 +26,7 @@
     "_prefab": null,
     "autoReleaseAssets": false,
     "_globals": {
-      "__id__": 115
+      "__id__": 116
     },
     "_id": "9fce83d7-7da3-4dbf-af37-956729aadd1f"
   },
@@ -90,13 +90,13 @@
     "_active": true,
     "_components": [
       {
-        "__id__": 112
-      },
-      {
         "__id__": 113
       },
       {
         "__id__": 114
+      },
+      {
+        "__id__": 115
       }
     ],
     "_prefab": null,
@@ -4123,7 +4123,38 @@
     "debugUnlockAllCollectionOnStart": false,
     "debugSetCollectionProgressId": "ghost",
     "debugSetCollectionProgressCount": 100,
+    "collectionCardVisualBindings": [
+      {
+        "__id__": 112
+      }
+    ],
+    "fallbackCollectionCardIcon": null,
+    "fallbackCollectionDetailIcon": null,
+    "collectionDetailPanelPrefab": {
+      "__uuid__": "84286134-5741-4601-bbc4-7c88aac05d0b",
+      "__expectedType__": "cc.Prefab"
+    },
     "_id": "7dRjS51oNJuI6d0ZxM8cQ1"
+  },
+  {
+    "__type__": "CollectionCardVisualBinding",
+    "collectionId": "stage1_boxer_brute",
+    "cardIcon": {
+      "__uuid__": "15d57301-e55a-4029-9c64-69c64c47633c@f9941",
+      "__expectedType__": "cc.SpriteFrame"
+    },
+    "previewFrame": {
+      "__uuid__": "900efb05-8ad9-45ad-91a7-4c4aa4940149@f9941",
+      "__expectedType__": "cc.SpriteFrame"
+    },
+    "detailIcon": {
+      "__uuid__": "255fc514-8ca5-49fc-8d42-91c3578ad0ab@f9941",
+      "__expectedType__": "cc.SpriteFrame"
+    },
+    "detailDisplayPrefab": {
+      "__uuid__": "0fba21d1-ed10-4242-b837-636e41950183",
+      "__expectedType__": "cc.Prefab"
+    }
   },
   {
     "__type__": "cc.UITransform",
@@ -4193,19 +4224,19 @@
   {
     "__type__": "cc.SceneGlobals",
     "ambient": {
-      "__id__": 116
-    },
-    "shadows": {
       "__id__": 117
     },
-    "_skybox": {
+    "shadows": {
       "__id__": 118
     },
-    "fog": {
+    "_skybox": {
       "__id__": 119
     },
-    "octree": {
+    "fog": {
       "__id__": 120
+    },
+    "octree": {
+      "__id__": 121
     }
   },
   {

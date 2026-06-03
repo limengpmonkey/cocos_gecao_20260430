@@ -8,6 +8,7 @@ export interface CollectionDefinition {
     name: string;
     badge: string;
     rarity: CollectionRarity;
+    encounterType?: 'standard' | 'stage1_timed';
     unlockTarget: number;
     accent: string;
     shortDescription: string;
@@ -58,6 +59,7 @@ const COLLECTION_DEFINITIONS: CollectionDefinition[] = [
         name: '幽影追猎者',
         badge: 'COMMON',
         rarity: 'common',
+        encounterType: 'standard',
         unlockTarget: 120,
         accent: '#5ec8ff',
         shortDescription: '会持续贴近玩家的基础游魂单位。',
@@ -69,6 +71,7 @@ const COLLECTION_DEFINITIONS: CollectionDefinition[] = [
         name: '可乐罐突进者',
         badge: 'COMMON',
         rarity: 'common',
+        encounterType: 'standard',
         unlockTarget: 100,
         accent: '#ff9860',
         shortDescription: '伪装成罐体的高速近战小怪。',
@@ -80,6 +83,7 @@ const COLLECTION_DEFINITIONS: CollectionDefinition[] = [
         name: '幽影主宰',
         badge: 'BOSS',
         rarity: 'boss',
+        encounterType: 'standard',
         unlockTarget: 1,
         accent: '#ffd46a',
         shortDescription: '第一类关底首领，拥有更高生命和压场能力。',
@@ -91,6 +95,7 @@ const COLLECTION_DEFINITIONS: CollectionDefinition[] = [
         name: '罐潮领主',
         badge: 'BOSS',
         rarity: 'boss',
+        encounterType: 'standard',
         unlockTarget: 1,
         accent: '#f7c35a',
         shortDescription: '第二类关底首领，兼顾硬度与持续追击。',
@@ -102,6 +107,7 @@ const COLLECTION_DEFINITIONS: CollectionDefinition[] = [
         name: '幻信使',
         badge: 'RARE',
         rarity: 'rare',
+        encounterType: 'standard',
         unlockTarget: 1,
         accent: '#79f2de',
         shortDescription: '稀有幽影变体，会在中后段随机入场。',
@@ -113,11 +119,36 @@ const COLLECTION_DEFINITIONS: CollectionDefinition[] = [
         name: '王冠罐灵',
         badge: 'RARE',
         rarity: 'rare',
+        encounterType: 'standard',
         unlockTarget: 1,
         accent: '#ff7d7d',
         shortDescription: '稀有可乐罐变体，出现时会带来更强压迫。',
         details: '它是高威胁的稀有收集目标，只会随机出现且同屏数量受限，适合作为长期图鉴目标。',
         strategy: '中局后留意高亮精英单位。系统带有保底概率提升，连续几轮没刷出时，下次出现的概率会升高。',
+    },
+    {
+        id: 'stage1_can_champion',
+        name: '巨型可乐罐',
+        badge: 'EVENT',
+        rarity: 'rare',
+        encounterType: 'stage1_timed',
+        unlockTarget: 1,
+        accent: '#ffb36a',
+        shortDescription: '第一关限时出现的放大型可乐罐收藏目标。',
+        details: '它会在第一关 15 到 30 秒之间被预警后登场，体型更大、生命更厚，并且只会短暂停留。',
+        strategy: '提前留爆发技能，预警出现后迅速清空周边小怪，集中火力在倒计时结束前完成击杀。',
+    },
+    {
+        id: 'stage1_boxer_brute',
+        name: '巨型纸箱怪',
+        badge: 'EVENT',
+        rarity: 'rare',
+        encounterType: 'stage1_timed',
+        unlockTarget: 1,
+        accent: '#ffd978',
+        shortDescription: '第一关限时出现的放大型纸箱收藏目标。',
+        details: '它与巨型可乐罐共享第一关挑战事件，只要本局出现并在限时内击败，就能登记对应收集卡。',
+        strategy: '注意预警后的位置，尽量在出生瞬间贴近输出；超时会自动撤离，本局奖励也会随之失去。',
     },
 ];
 
@@ -263,9 +294,15 @@ export class CollectionSystem {
     }
 
     public static getPreferredRareDefinitions(): CollectionDefinition[] {
-        const rareDefinitions = COLLECTION_DEFINITIONS.filter(definition => definition.rarity === 'rare');
+        const rareDefinitions = COLLECTION_DEFINITIONS.filter(definition => definition.rarity === 'rare' && definition.encounterType !== 'stage1_timed');
         const locked = rareDefinitions.filter(definition => !this.getEntrySnapshot(definition.id)?.unlocked);
         return locked.length > 0 ? locked : rareDefinitions;
+    }
+
+    public static getPreferredStageOneTimedDefinitions(): CollectionDefinition[] {
+        const timedDefinitions = COLLECTION_DEFINITIONS.filter(definition => definition.encounterType === 'stage1_timed');
+        const locked = timedDefinitions.filter(definition => !this.getEntrySnapshot(definition.id)?.unlocked);
+        return locked.length > 0 ? locked : timedDefinitions;
     }
 
     public static markSeen(id: string): void {

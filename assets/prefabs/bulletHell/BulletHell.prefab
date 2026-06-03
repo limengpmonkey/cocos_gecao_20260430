@@ -1044,7 +1044,7 @@
     ],
     "fallbackSkillCardIcon": null,
     "debugForcedSkillIds": [],
-    "debugForceSingleSkillId": "trash_bag_field",
+    "debugForceSingleSkillId": "",
     "debugDisableDamageForSingleSkill": false,
     "_id": ""
   },
@@ -2724,7 +2724,7 @@
       "__uuid__": "d811590f-8493-4b9a-b62a-a4915a9310c4",
       "__expectedType__": "cc.Prefab"
     },
-    "debugStartWithBossFight": true,
+    "debugStartWithBossFight": false,
     "bossSpawnDelay": 1,
     "bossEntranceBufferTime": 1,
     "bossIntroWeaponLockTime": 0.6,

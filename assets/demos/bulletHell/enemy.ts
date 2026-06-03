@@ -1,5 +1,5 @@
 // Enemy.ts - 修复版，直接添加状态控制
-import { _decorator, Animation, instantiate, PhysicsSystem, Prefab, Quat, Vec3, CCInteger, Node, Sprite, Color, EventTarget, tween } from 'cc';
+import { _decorator, Animation, instantiate, PhysicsSystem, Prefab, Quat, Vec3, CCInteger, Node, Sprite, Color, EventTarget, Graphics, UITransform, tween } from 'cc';
 import { cBody } from '../../collision/Body';
 import { cObject, Trigger } from '../../collision/Object';
 import { BulletHell } from './bulletHell';
@@ -130,6 +130,10 @@ export class Enemy extends cObject {
     private _eliteExplodeDamage: number = 12;
     private _movementDebuffTimer: number = 0;
     private _movementDebuffMultiplier: number = 1;
+    private _customVisualScaleMultiplier: number = 1;
+    private _challengeHighlightNode: Node | null = null;
+    private _challengeHighlightGraphics: Graphics | null = null;
+    private _challengeHighlightStyle: 'default' | 'box' = 'default';
     private _pendingSuctionDeathDuration: number = 0;
     private _hasPendingSuctionDeath: boolean = false;
     private _pendingSuctionDeathWorldTarget: Vec3 = new Vec3();
@@ -310,6 +314,8 @@ export class Enemy extends cObject {
         this._bossEntranceFlashOn = false;
         this._movementDebuffTimer = 0;
         this._movementDebuffMultiplier = 1;
+        this._customVisualScaleMultiplier = 1;
+        this.setChallengeHighlight(false);
         this._pendingSuctionDeathDuration = 0;
         this._hasPendingSuctionDeath = false;
         this._pendingSuctionDeathWorldTarget.set(Vec3.ZERO);
@@ -329,6 +335,56 @@ export class Enemy extends cObject {
         }, 0);
 
         this.applyVisualState();
+    }
+
+    private ensureChallengeHighlightNode(): void {
+        if (this._challengeHighlightNode && this._challengeHighlightGraphics) {
+            return;
+        }
+
+        const highlightNode = new Node('ChallengeHighlight');
+        highlightNode.layer = this.node.layer;
+        highlightNode.addComponent(UITransform).setContentSize(2, 2);
+        const graphics = highlightNode.addComponent(Graphics);
+        this.node.addChild(highlightNode);
+        highlightNode.setSiblingIndex(this.node.children.length - 1);
+
+        this._challengeHighlightNode = highlightNode;
+        this._challengeHighlightGraphics = graphics;
+        this._challengeHighlightNode.active = false;
+    }
+
+    private updateChallengeHighlightVisual(): void {
+        if (!this._challengeHighlightNode || !this._challengeHighlightGraphics) {
+            return;
+        }
+
+        this._challengeHighlightNode.active = true;
+
+        const graphics = this._challengeHighlightGraphics;
+        graphics.clear();
+
+        if (this._challengeHighlightStyle === 'box') {
+            graphics.lineWidth = 6;
+            graphics.fillColor = new Color(146, 24, 24, 48);
+            graphics.strokeColor = new Color(255, 214, 92, 255);
+            graphics.roundRect(-92, -78, 184, 156, 20);
+            graphics.fill();
+            graphics.stroke();
+
+            graphics.lineWidth = 3;
+            graphics.strokeColor = new Color(255, 86, 86, 238);
+            graphics.roundRect(-82, -68, 164, 136, 16);
+            graphics.stroke();
+            return;
+        }
+
+        graphics.lineWidth = 5;
+        graphics.fillColor = new Color(186, 120, 36, 36);
+        graphics.strokeColor = new Color(255, 214, 120, 250);
+        graphics.circle(0, 0, 74);
+        graphics.fill();
+        graphics.stroke();
     }
 
     private getReusableIdleAnimationName(animation: Animation): string {
@@ -402,7 +458,7 @@ export class Enemy extends cObject {
     }
 
     private applyVisualState(): void {
-        const scaleMultiplier = this._isBoss ? Enemy.bossVisualScaleMultiplier : Enemy.normalVisualScaleMultiplier;
+        const scaleMultiplier = (this._isBoss ? Enemy.bossVisualScaleMultiplier : Enemy.normalVisualScaleMultiplier) * Math.max(0.1, this._customVisualScaleMultiplier);
         const pixelPerfectScaler = this.getComponent(PixelPerfectScaler);
         const baseScale = pixelPerfectScaler ? pixelPerfectScaler.originalScale : this._baseScale;
         const pixelScaleMultiplier = pixelPerfectScaler ? pixelPerfectScaler.scaleMultiplier : 1;
@@ -430,15 +486,18 @@ export class Enemy extends cObject {
 
         if (this._isBoss) {
             this.restoreBaseSpriteColors(sprites);
+            this.updateChallengeHighlightVisual();
             return;
         }
 
         if (this._isElite) {
             this.applyColorToSprites(this._eliteSpriteColor);
+            this.updateChallengeHighlightVisual();
             return;
         }
 
         this.restoreBaseSpriteColors(sprites);
+        this.updateChallengeHighlightVisual();
     }
 
     private cacheVisualSprites(): void {
@@ -493,6 +552,25 @@ export class Enemy extends cObject {
         this._collectionKey = (collectionKey || this.constructor.name).trim();
         this._collectionDisplayName = (displayName || this.node?.name || this.constructor.name).trim();
         this._isRareCollectionTarget = !!isRare;
+    }
+
+    setCustomVisualScaleMultiplier(multiplier: number): void {
+        this._customVisualScaleMultiplier = Math.max(0.1, multiplier || 1);
+        this.applyVisualState();
+    }
+
+    setChallengeHighlight(enabled: boolean, style: 'default' | 'box' = 'default'): void {
+        this._challengeHighlightStyle = style;
+
+        if (!enabled) {
+            if (this._challengeHighlightNode) {
+                this._challengeHighlightNode.active = false;
+            }
+            return;
+        }
+
+        this.ensureChallengeHighlightNode();
+        this.updateChallengeHighlightVisual();
     }
 
     resetCollectionMetadata(): void {
