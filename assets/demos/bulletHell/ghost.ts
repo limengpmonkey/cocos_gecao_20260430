@@ -13,11 +13,16 @@ export class Ghost extends Enemy {
     // 缓存池管理
     static pools: Array<Ghost> = [];
     
-    static get(prefab: Prefab): Ghost {
+    static get(prefab: Prefab): Ghost | null {
         let ghost = this.pools.pop();
         if (!ghost) {
             let node = instantiate(prefab);
             ghost = node.getComponent(Ghost);
+            if (!ghost) {
+                console.error('[Ghost] Ghost prefab must include Ghost component.');
+                node.destroy();
+                return null;
+            }
         }
         ghost.node.active = true;
         return ghost;

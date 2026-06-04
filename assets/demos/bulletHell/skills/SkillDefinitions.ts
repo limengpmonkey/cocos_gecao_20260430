@@ -11,7 +11,7 @@
  * 这些实现侧重于可扩展性，能为后续的技能融合、技能树等功能提供基础。
  */
 
-import { Animation, Color, Component, Vec3, Node, ParticleSystem2D, Quat, Sprite, tween, PhysicsSystem, UITransform, view } from 'cc';
+import { Animation, Color, Component, Graphics, Vec3, Node, ParticleSystem2D, Quat, Sprite, tween, PhysicsSystem, UITransform, view } from 'cc';
 import { ActiveSkill } from './ActiveSkill';
 import { BoostSkill } from './BoostSkill';
 import { SummonSkill } from './SummonSkill';
@@ -38,6 +38,35 @@ interface ProjectileOptions {
     speed: number;
     lifeTime: number;
     damage?: number;
+}
+
+interface PressureCanisterState {
+    visual: Skill | null;
+    impactPrefab: import('cc').Prefab | null;
+    launchPosition: Vec3;
+    landingPosition: Vec3;
+    currentPosition: Vec3;
+    throwDirection: Vec3;
+    elapsed: number;
+    fuseTime: number;
+    damage: number;
+    blastRadius: number;
+    knockbackStrength: number;
+    stunDuration: number;
+    arcHeight: number;
+    isExploding: boolean;
+    explosionElapsed: number;
+    explosionDuration: number;
+}
+
+interface MopTrailState {
+    node: Node;
+    graphics: Graphics;
+    worldPosition: Vec3;
+    radiusX: number;
+    radiusY: number;
+    elapsed: number;
+    duration: number;
 }
 
 function spawnProjectile(opts: ProjectileOptions) {
@@ -1157,39 +1186,405 @@ export class TrashBagFieldSkill extends ActiveSkill {
 }
 
 export class VacuumVortexSkill extends ActiveSkill {
+    private static readonly THROW_CLIP_NAME = 'throw';
+    private static readonly RELEASE_CLIP_NAME = 'yaliguan_shifang';
+
     static CONFIG: SkillConfig = {
         id: 'vacuum_vortex',
-        name: '吸尘器漩涡',
-        description: '产生向中心牵引的漩涡。',
+        name: '压力罐冲击',
+        description: '周期性抛出压力罐，延时爆炸并震开敌人，满级后可追加眩晕。',
         icon: 'skill_vacuum',
         ...commonActiveSkillConfig,
     } as SkillConfig;
 
-    private radius = 160;
-    private pullStrength = 120;
-    private stunChance = 0.0;
+    private throwDistance = 120;
+    private throwTravelDuration = 0.38;
+    private fuseTime = 1.8;
+    private blastRadius = 110;
+    private impactDamage = 42;
+    private knockbackStrength = 240;
+    private stunDuration = 0;
+    private readonly activeCanisters: PressureCanisterState[] = [];
+    private readonly canisterBaseScale = new Vec3(1, 1, 1);
+    private readonly shockwaveStartScale = new Vec3(0.18, 0.18, 1);
+    private readonly shockwaveTargetScale = new Vec3(1, 1, 1);
+    private readonly tempDirection = new Vec3(1, 0, 0);
+    private readonly tempLandingPosition = new Vec3();
+    private readonly tempLocalPosition = new Vec3();
+    private readonly tempScale = new Vec3(1, 1, 1);
+    private readonly tempEnemyDelta = new Vec3();
+    private readonly fallbackThrowDirection = new Vec3(1, 0, 0);
 
     constructor(level: number = 1) {
         super(VacuumVortexSkill.CONFIG, level);
-        this.cooldown = 5;
         this.updateByLevel();
     }
 
     private updateByLevel() {
-        this.radius = 140 + this.level * 12;
-        this.pullStrength = 100 + this.level * 10;
-        this.stunChance = Math.min(0.25, 0.05 * (this.level - 1));
+        this.cooldown = Math.max(2.2, 3.8 - (this.level - 1) * 0.16);
+        this.throwDistance = 96 + this.level * 10;
+        this.fuseTime = Math.max(1.1, 2.1 - (this.level - 1) * 0.06);
+        this.blastRadius = 88 + this.level * 10;
+        this.impactDamage = 24 + this.level * 14;
+        this.knockbackStrength = 170 + this.level * 42;
+        this.stunDuration = this.isTransformed ? 1.2 : 0;
+    }
+
+    public levelUp(): void {
+        super.levelUp();
+        this.updateByLevel();
+    }
+
+    public getDescription(): string {
+        const stunText = this.stunDuration > 0
+            ? `爆炸后额外眩晕 ${this.stunDuration.toFixed(1)}s。`
+            : '满级后会追加地面眩晕。';
+        return `每 ${this.cooldown.toFixed(1)}s 抛出一个压力罐，${this.fuseTime.toFixed(1)}s 后爆炸，造成 ${this.impactDamage} 伤害并击退半径 ${Math.round(this.blastRadius)} 内敌人。${stunText}`;
+    }
+
+    public update(dt: number): void {
+        super.update(dt);
+
+        if (this.activeCanisters.length <= 0) {
+            return;
+        }
+
+        for (let i = this.activeCanisters.length - 1; i >= 0; i--) {
+            const canister = this.activeCanisters[i];
+            canister.elapsed += dt;
+            if (canister.isExploding) {
+                canister.explosionElapsed += dt;
+            }
+            this.updateCanisterVisual(canister);
+
+            if (!canister.isExploding && canister.elapsed >= canister.fuseTime) {
+                this.explodeCanister(canister);
+            }
+
+            if (canister.isExploding && canister.explosionElapsed >= canister.explosionDuration) {
+                this.activeCanisters.splice(i, 1);
+            }
+        }
     }
 
     protected onUse(context: SkillContext): void {
-        const center = context.ownerNode.worldPosition;
-        //console.log(`[技能] 吸尘器漩涡 (Lv${this.level}) 生成，范围 ${this.radius}`);
+        const ownerPosition = context.ownerNode.worldPosition;
+        const parent = BulletHell.inst?.bullets;
+        const prefab = context.payload?.visual?.projectilePrefab ?? null;
+        const impactPrefab = context.payload?.visual?.impactPrefab ?? null;
 
-        if (this.isTransformed) {
-            //console.log('[技能] 质变：黑洞吸尘器（吞噬低血量敌人）');
+        const landingPosition = this.getLandingPosition(context);
+        const direction = new Vec3(
+            landingPosition.x - ownerPosition.x,
+            landingPosition.y - ownerPosition.y,
+            0
+        );
+        if (direction.lengthSqr() <= 0.0001) {
+            direction.set(this.getFallbackThrowDirection());
+        }
+        direction.normalize();
+
+        let visual: Skill | null = null;
+        if (parent && prefab) {
+            visual = Skill.get(prefab);
+            if (visual) {
+                visual.insert(parent);
+                visual.init();
+                visual.disableAutoRotation = true;
+                visual.trigger = false;
+                visual.velocity.set(0, 0, 0);
+                visual.lifeTime = this.fuseTime + 0.8;
+                visual.damage = 0;
+                visual.penetration = 9999;
+                visual.knockback = 0;
+                this.canisterBaseScale.set(visual.node.scale);
+                this.playPressureCanisterAnimation(visual.node, VacuumVortexSkill.THROW_CLIP_NAME);
+            }
         }
 
-        // TODO: 这里应在场景中创建一个持续效果区域，将敌人拉向中心，并根据吸附强度损失生命。
+        const canister: PressureCanisterState = {
+            visual,
+            impactPrefab,
+            launchPosition: new Vec3(ownerPosition.x, ownerPosition.y, ownerPosition.z),
+            landingPosition: new Vec3(landingPosition.x, landingPosition.y, landingPosition.z),
+            currentPosition: new Vec3(ownerPosition.x, ownerPosition.y, ownerPosition.z),
+            throwDirection: new Vec3(direction.x, direction.y, 0),
+            elapsed: 0,
+            fuseTime: this.fuseTime,
+            damage: this.impactDamage,
+            blastRadius: this.blastRadius,
+            knockbackStrength: this.knockbackStrength,
+            stunDuration: this.stunDuration,
+            arcHeight: 28 + this.throwDistance * 0.22,
+            isExploding: false,
+            explosionElapsed: 0,
+            explosionDuration: 0.3,
+        };
+
+        this.activeCanisters.push(canister);
+        this.updateCanisterVisual(canister);
+    }
+
+    private getLandingPosition(context: SkillContext): Vec3 {
+        const origin = context.ownerNode.worldPosition;
+        const target = context.targetPosition ?? this.findNearestEnemyPosition(origin);
+
+        if (target) {
+            this.tempDirection.set(target.x - origin.x, target.y - origin.y, 0);
+        } else {
+            this.tempDirection.set(this.getFallbackThrowDirection());
+        }
+
+        if (this.tempDirection.lengthSqr() <= 0.0001) {
+            this.tempDirection.set(this.getFallbackThrowDirection());
+        }
+
+        this.tempDirection.normalize();
+        this.tempLandingPosition.set(
+            origin.x + this.tempDirection.x * this.throwDistance,
+            origin.y + this.tempDirection.y * this.throwDistance,
+            origin.z
+        );
+
+        return this.tempLandingPosition;
+    }
+
+    private getFallbackThrowDirection(): Vec3 {
+        const angle = Math.random() * Math.PI * 2;
+        this.fallbackThrowDirection.set(Math.cos(angle), Math.sin(angle), 0);
+        return this.fallbackThrowDirection;
+    }
+
+    private findNearestEnemyPosition(origin: Vec3): Vec3 | null {
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            return null;
+        }
+
+        let nearest: Vec3 | null = null;
+        let nearestDistanceSq = Number.POSITIVE_INFINITY;
+
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead || enemy.isDyingState) {
+                continue;
+            }
+
+            const dx = enemyNode.worldPosition.x - origin.x;
+            const dy = enemyNode.worldPosition.y - origin.y;
+            const distanceSq = dx * dx + dy * dy;
+            if (distanceSq >= nearestDistanceSq) {
+                continue;
+            }
+
+            nearestDistanceSq = distanceSq;
+            nearest = enemyNode.worldPosition;
+        }
+
+        return nearest;
+    }
+
+    private updateCanisterVisual(canister: PressureCanisterState): void {
+        const travelProgress = Math.min(1, canister.elapsed / this.throwTravelDuration);
+        const easedTravel = 1 - Math.pow(1 - travelProgress, 2);
+        const arcFactor = Math.sin(travelProgress * Math.PI);
+
+        const verticalArcOffset = canister.isExploding ? 0 : arcFactor * canister.arcHeight;
+
+        canister.currentPosition.set(
+            canister.launchPosition.x + (canister.landingPosition.x - canister.launchPosition.x) * easedTravel,
+            canister.launchPosition.y + (canister.landingPosition.y - canister.launchPosition.y) * easedTravel + verticalArcOffset,
+            canister.launchPosition.z
+        );
+
+        if (canister.isExploding) {
+            canister.currentPosition.set(canister.landingPosition);
+        }
+
+        const visual = canister.visual;
+        const parent = BulletHell.inst?.bullets;
+        if (!visual || !parent) {
+            return;
+        }
+
+        Vec3.subtract(this.tempLocalPosition, canister.currentPosition, parent.worldPosition);
+        visual.setPosition(this.tempLocalPosition);
+
+        if (canister.isExploding) {
+            const explosionProgress = Math.min(1, canister.explosionElapsed / Math.max(0.001, canister.explosionDuration));
+            const releaseScale = 1 + explosionProgress * 0.45;
+            this.tempScale.set(
+                this.canisterBaseScale.x * releaseScale,
+                this.canisterBaseScale.y * releaseScale,
+                this.canisterBaseScale.z
+            );
+            visual.setScale(this.tempScale);
+            return;
+        }
+
+        const pulse = canister.elapsed >= canister.fuseTime * 0.65
+            ? 1 + Math.sin(canister.elapsed * 24) * 0.16
+            : 1;
+        const arcScale = 0.92 + arcFactor * 0.22;
+        const squash = 0.84 + arcFactor * 0.34;
+        this.tempScale.set(
+            this.canisterBaseScale.x * squash * pulse,
+            this.canisterBaseScale.y * arcScale * pulse,
+            this.canisterBaseScale.z
+        );
+        visual.setScale(this.tempScale);
+    }
+
+    private explodeCanister(canister: PressureCanisterState): void {
+        canister.isExploding = true;
+        canister.explosionElapsed = 0;
+        this.spawnImpactShockwave(canister);
+        const enemies = this.collectEnemiesInRadius(canister.landingPosition, canister.blastRadius);
+        for (const enemy of enemies) {
+            const enemyPosition = enemy.node.worldPosition;
+            this.tempEnemyDelta.set(
+                enemyPosition.x - canister.landingPosition.x,
+                enemyPosition.y - canister.landingPosition.y,
+                0
+            );
+
+            const distance = this.tempEnemyDelta.length();
+            if (distance <= 0.001) {
+                this.tempEnemyDelta.set(canister.throwDirection);
+            } else {
+                this.tempEnemyDelta.multiplyScalar(1 / distance);
+            }
+
+            const distanceRatio = Math.max(0.25, 1 - distance / Math.max(1, canister.blastRadius));
+            const damage = Math.round(canister.damage * (0.7 + distanceRatio * 0.6));
+            enemy.takeDamage(damage);
+            enemy.applyKnockback(
+                this.tempEnemyDelta,
+                canister.knockbackStrength * (enemy.isBoss ? 0.45 : 1),
+                enemy.isBoss ? 0.12 : 0.18
+            );
+
+            if (canister.stunDuration > 0 && !enemy.isBoss) {
+                enemy.applyStun(canister.stunDuration);
+            }
+        }
+
+        if (canister.visual) {
+            if (canister.impactPrefab) {
+                Skill.put(canister.visual);
+                canister.visual = null;
+            } else {
+                const releaseDuration = this.playPressureCanisterAnimation(canister.visual.node, VacuumVortexSkill.RELEASE_CLIP_NAME);
+                canister.explosionDuration = Math.max(0.24, releaseDuration || 0.3);
+                canister.visual.lifeTime = canister.explosionDuration + 0.1;
+            }
+        }
+
+        this.updateCanisterVisual(canister);
+    }
+
+    private spawnImpactShockwave(canister: PressureCanisterState): void {
+        const impactPrefab = canister.impactPrefab;
+        const parent = BulletHell.inst?.bullets;
+        if (!impactPrefab || !parent) {
+            return;
+        }
+
+        const shockwave = Skill.get(impactPrefab);
+        if (!shockwave) {
+            return;
+        }
+
+        shockwave.insert(parent);
+        shockwave.init();
+        shockwave.disableAutoRotation = true;
+        shockwave.trigger = false;
+        shockwave.velocity.set(0, 0, 0);
+        shockwave.damage = 0;
+        shockwave.penetration = 9999;
+        shockwave.knockback = 0;
+
+        Vec3.subtract(this.tempLocalPosition, canister.landingPosition, parent.worldPosition);
+        shockwave.setPosition(this.tempLocalPosition);
+
+        const releaseDuration = this.playPressureCanisterAnimation(shockwave.node, VacuumVortexSkill.RELEASE_CLIP_NAME);
+        canister.explosionDuration = Math.max(0.24, releaseDuration || 0.32);
+        shockwave.lifeTime = canister.explosionDuration + 0.1;
+
+        const baseRadius = this.getImpactVisualBaseRadius(shockwave.node);
+        const targetScale = Math.max(0.08, canister.blastRadius / Math.max(1, baseRadius));
+
+        this.shockwaveStartScale.set(targetScale * 0.18, targetScale * 0.18, 1);
+        this.shockwaveTargetScale.set(targetScale, targetScale, 1);
+        shockwave.setScale(this.shockwaveStartScale);
+
+        tween(shockwave.node)
+            .stop()
+            .to(canister.explosionDuration, { scale: this.shockwaveTargetScale })
+            .start();
+    }
+
+    private getImpactVisualBaseRadius(node: Node): number {
+        const transform = node.getComponent(UITransform);
+        if (!transform) {
+            return 64;
+        }
+
+        return Math.max(1, Math.max(transform.contentSize.width, transform.contentSize.height) * 0.5);
+    }
+
+    private playPressureCanisterAnimation(node: Node, preferredClipName: string): number {
+        const animations = node.getComponentsInChildren(Animation);
+        if (!animations || animations.length <= 0) {
+            return 0;
+        }
+
+        let maxDuration = 0;
+        for (const animation of animations) {
+            const animationAny = animation as any;
+            const clips = (animationAny.clips as Array<{ name?: string; duration?: number }> | undefined) ?? [];
+            const clip = clips.find(item => item?.name === preferredClipName) ?? animationAny.defaultClip ?? clips[0] ?? null;
+            if (!clip) {
+                continue;
+            }
+
+            animation.stop();
+            if (clip.name) {
+                animation.play(clip.name);
+            } else {
+                animation.play();
+            }
+
+            if (typeof clip.duration === 'number' && clip.duration > maxDuration) {
+                maxDuration = clip.duration;
+            }
+        }
+
+        return maxDuration;
+    }
+
+    private collectEnemiesInRadius(center: Vec3, radius: number): Enemy[] {
+        const enemies: Enemy[] = [];
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            return enemies;
+        }
+
+        const radiusSq = radius * radius;
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead || enemy.isDyingState) {
+                continue;
+            }
+
+            const dx = enemyNode.worldPosition.x - center.x;
+            const dy = enemyNode.worldPosition.y - center.y;
+            if (dx * dx + dy * dy <= radiusSq) {
+                enemies.push(enemy);
+            }
+        }
+
+        return enemies;
     }
 }
 
@@ -2078,15 +2473,56 @@ export class TrashGuardSkill extends SummonSkill {
 }
 
 export class MopGhostSkill extends SummonSkill {
+    private static readonly IDLE_CLIP_NAME = 'idle';
+    private static readonly ATTACK_CLIP_NAME = 'tuodiyouling_attack';
+
     static CONFIG: SkillConfig = {
         id: 'mop_ghost',
         name: '拖地幽灵',
-        description: '留下持续伤害的污渍轨迹。',
+        description: '围绕玩家游走，周期性突进最近敌人并拖出减速水渍。',
         icon: 'skill_ghost',
         ...commonSummonSkillConfig,
     } as SkillConfig;
 
-    private trailDuration = 6;
+    private attackInterval = 2.7;
+    private summonDuration = 26;
+    private standbyRadius = 72;
+    private minPlayerClearRadius = 54;
+    private maxLeashRadius = 156;
+    private followMoveSpeed = 164;
+    private dashMoveSpeed = 720;
+    private attackDamage = 30;
+    private attackHitRadius = 34;
+    private dashMinDistance = 80;
+    private dashMaxDistance = 208;
+    private trailDuration = 5.2;
+    private trailWidth = 30;
+    private trailLength = 54;
+    private trailSpawnInterval = 18;
+    private trailSlowDuration = 0.42;
+    private trailSlowMultiplier = 0.62;
+    private transformedReservedMultiplier = 1;
+
+    private ownerNode: Node | null = null;
+    private summonParent: Node | null = null;
+    private ghostVisual: Skill | null = null;
+    private ghostAnimations: Animation[] = [];
+    private isSummoned = false;
+    private isAttacking = false;
+    private summonElapsed = 0;
+    private attackElapsed = 0;
+    private distanceSinceTrailSpawn = 0;
+    private readonly ghostPosition = new Vec3();
+    private readonly standbyOffset = new Vec3();
+    private readonly desiredWorldPosition = new Vec3();
+    private readonly attackTargetWorldPosition = new Vec3();
+    private readonly attackDirection = new Vec3(1, 0, 0);
+    private readonly tempMoveDelta = new Vec3();
+    private readonly tempOwnerOffset = new Vec3();
+    private readonly tempLocalPosition = new Vec3();
+    private readonly ghostBaseScale = new Vec3(1, 1, 1);
+    private readonly hitEnemiesThisDash = new Set<Enemy>();
+    private readonly trailStates: MopTrailState[] = [];
 
     constructor(level: number = 1) {
         super(MopGhostSkill.CONFIG, level);
@@ -2094,11 +2530,452 @@ export class MopGhostSkill extends SummonSkill {
     }
 
     private updateByLevel() {
-        this.trailDuration = 4 + this.level * 0.6;
+        this.attackInterval = Math.max(1.4, 2.8 - (this.level - 1) * 0.12);
+        this.attackDamage = 18 + this.level * 12;
+        this.attackHitRadius = 24 + this.level * 2.2;
+        this.summonDuration = 20 + this.level * 2.4;
+        this.followMoveSpeed = 146 + this.level * 10;
+        this.dashMoveSpeed = 620 + this.level * 26;
+        this.standbyRadius = 56 + this.level * 4;
+        this.minPlayerClearRadius = Math.min(this.standbyRadius - 10, 44 + this.level * 2);
+        this.maxLeashRadius = 128 + this.level * 6;
+        this.dashMinDistance = 60 + this.level * 3;
+        this.dashMaxDistance = 164 + this.level * 8;
+        this.trailDuration = 3.6 + this.level * 0.42;
+        this.trailWidth = 18 + this.level * 3.2;
+        this.trailLength = this.trailWidth * 1.85;
+        this.trailSpawnInterval = Math.max(12, this.trailWidth * 0.7);
+        this.trailSlowDuration = 0.26 + this.level * 0.03;
+        this.trailSlowMultiplier = Math.max(0.26, 0.78 - this.level * 0.04);
+        this.transformedReservedMultiplier = this.isTransformed ? 1.2 : 1;
+    }
+
+    public levelUp(): void {
+        super.levelUp();
+        this.updateByLevel();
+    }
+
+    public update(dt: number): void {
+        this.updateTrailStates(dt);
+
+        if (!this.isSummoned || !this.ownerNode || !this.ghostVisual || !this.summonParent) {
+            return;
+        }
+
+        if (this.ghostVisual.node.parent !== this.summonParent) {
+            this.ghostVisual.insert(this.summonParent);
+            this.syncGhostToWorld(this.ghostPosition);
+            this.configureGhostVisualCollision();
+        }
+
+        this.summonElapsed += dt;
+        if (this.summonElapsed >= this.summonDuration) {
+            this.clearGhost();
+            return;
+        }
+
+        if (this.isAttacking) {
+            if (this.moveGhostTowards(this.attackTargetWorldPosition, this.dashMoveSpeed, dt)) {
+                this.finishAttack();
+            } else {
+                this.spawnTrailAlongMovement();
+                this.applyDashHitDamage();
+            }
+            return;
+        }
+
+        this.attackElapsed += dt;
+        if (this.attackElapsed >= this.attackInterval && this.beginAttack()) {
+            return;
+        }
+
+        this.followOwner(dt);
+    }
+
+    public onUnequip(owner: Node): void {
+        this.clearGhost();
+    }
+
+    public getDescription(): string {
+        const transformedText = this.isTransformed
+            ? '终阶形态预留中，当前先保留数值增幅接口。'
+            : '终阶形态暂未设计，逻辑接口已预留。';
+        return `每 ${this.attackInterval.toFixed(1)}s 突进最近敌人，碰撞造成 ${Math.round(this.attackDamage)} 伤害，并留下更宽的蓝色水渍减速敌人。${transformedText}`;
     }
 
     protected onSummon(context: SkillContext): void {
-        console.log('[召唤] 拖地幽灵 召唤（占位）');
-        // TODO: 在场景中生成一个幽灵实体，并让其在移动时留下持续伤害区域。
+        this.ownerNode = context.ownerNode;
+        this.summonParent = BulletHell.inst?.bullets;
+        if (!this.summonParent) {
+            console.warn('[召唤] 拖地幽灵：缺少 bullets 节点，无法召唤');
+            return;
+        }
+
+        const prefab = context.payload?.visual?.projectilePrefab ?? null;
+        if (!prefab) {
+            console.warn('[召唤] 拖地幽灵：未配置可视 prefab，无法召唤');
+            return;
+        }
+
+        if (!this.ghostVisual) {
+            this.ghostVisual = Skill.get(prefab);
+            if (!this.ghostVisual) {
+                console.warn('[召唤] 拖地幽灵：创建实体失败');
+                return;
+            }
+            this.ghostVisual.insert(this.summonParent);
+            this.ghostVisual.init();
+            this.ghostVisual.velocity.set(0, 0, 0);
+            this.ghostVisual.disableAutoRotation = true;
+        }
+
+        this.configureGhostVisualCollision();
+        this.ghostVisual.lifeTime = 999999;
+        this.ghostVisual.node.active = true;
+        this.ghostAnimations = this.ghostVisual.node.getComponentsInChildren(Animation);
+        this.ghostBaseScale.set(this.ghostVisual.node.scale);
+
+        this.isSummoned = true;
+        this.isAttacking = false;
+        this.summonElapsed = 0;
+        this.attackElapsed = 0;
+        this.distanceSinceTrailSpawn = 0;
+        this.hitEnemiesThisDash.clear();
+
+        this.pickStandbyOffset();
+        this.ghostPosition.set(this.ownerNode.worldPosition);
+        this.ghostPosition.add(this.standbyOffset);
+        this.syncGhostToWorld(this.ghostPosition);
+        this.playGhostAnimation(MopGhostSkill.IDLE_CLIP_NAME);
+    }
+
+    private followOwner(dt: number): void {
+        if (!this.ownerNode) {
+            return;
+        }
+
+        const ownerPos = this.ownerNode.worldPosition;
+        this.desiredWorldPosition.set(
+            ownerPos.x + this.standbyOffset.x,
+            ownerPos.y + this.standbyOffset.y,
+            0
+        );
+        this.clampWithinLeash(ownerPos, this.desiredWorldPosition);
+        this.moveGhostTowards(this.desiredWorldPosition, this.followMoveSpeed, dt);
+    }
+
+    private beginAttack(): boolean {
+        const nearestEnemy = this.findNearestEnemy(this.ghostPosition);
+        if (!nearestEnemy) {
+            return false;
+        }
+
+        const targetPosition = nearestEnemy.node.worldPosition;
+        this.attackDirection.set(
+            targetPosition.x - this.ghostPosition.x,
+            targetPosition.y - this.ghostPosition.y,
+            0
+        );
+        if (this.attackDirection.lengthSqr() <= 0.0001) {
+            this.attackDirection.set(1, 0, 0);
+        }
+        this.attackDirection.normalize();
+
+        const distanceToTarget = Vec3.distance(this.ghostPosition, targetPosition);
+        const dashDistance = Math.max(this.dashMinDistance, Math.min(this.dashMaxDistance, distanceToTarget + this.attackHitRadius));
+        this.attackTargetWorldPosition.set(
+            this.ghostPosition.x + this.attackDirection.x * dashDistance,
+            this.ghostPosition.y + this.attackDirection.y * dashDistance,
+            0
+        );
+
+        const ownerPos = this.ownerNode?.worldPosition;
+        if (ownerPos) {
+            this.clampWithinLeash(ownerPos, this.attackTargetWorldPosition);
+        }
+
+        this.isAttacking = true;
+        this.attackElapsed = 0;
+        this.distanceSinceTrailSpawn = this.trailSpawnInterval;
+        this.hitEnemiesThisDash.clear();
+        this.playGhostAnimation(MopGhostSkill.ATTACK_CLIP_NAME);
+        this.spawnTrailPatch(this.ghostPosition);
+        this.applyDashHitDamage();
+        return true;
+    }
+
+    private finishAttack(): void {
+        this.isAttacking = false;
+        this.distanceSinceTrailSpawn = 0;
+        this.hitEnemiesThisDash.clear();
+        this.playGhostAnimation(MopGhostSkill.IDLE_CLIP_NAME);
+        this.pickStandbyOffset();
+    }
+
+    private findNearestEnemy(origin: Vec3): Enemy | null {
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            return null;
+        }
+
+        let nearestEnemy: Enemy | null = null;
+        let nearestDistanceSq = Number.POSITIVE_INFINITY;
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead || enemy.isDyingState) {
+                continue;
+            }
+
+            const dx = enemyNode.worldPosition.x - origin.x;
+            const dy = enemyNode.worldPosition.y - origin.y;
+            const distanceSq = dx * dx + dy * dy;
+            if (distanceSq < nearestDistanceSq) {
+                nearestDistanceSq = distanceSq;
+                nearestEnemy = enemy;
+            }
+        }
+
+        return nearestEnemy;
+    }
+
+    private applyDashHitDamage(): void {
+        if (!this.ownerNode || isSkillDamageDisabledForTesting(MopGhostSkill.CONFIG.id)) {
+            return;
+        }
+
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            return;
+        }
+
+        const hitRadiusSq = this.attackHitRadius * this.attackHitRadius;
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead || enemy.isDyingState || this.hitEnemiesThisDash.has(enemy)) {
+                continue;
+            }
+
+            const dx = enemyNode.worldPosition.x - this.ghostPosition.x;
+            const dy = enemyNode.worldPosition.y - this.ghostPosition.y;
+            if (dx * dx + dy * dy > hitRadiusSq) {
+                continue;
+            }
+
+            enemy.takeDamage(Math.round(this.attackDamage * this.transformedReservedMultiplier), this.ownerNode);
+            this.hitEnemiesThisDash.add(enemy);
+        }
+    }
+
+    private updateTrailStates(dt: number): void {
+        if (this.trailStates.length <= 0) {
+            return;
+        }
+
+        const enemyRoot = BulletHell.inst?.objects;
+        for (let i = this.trailStates.length - 1; i >= 0; i--) {
+            const trail = this.trailStates[i];
+            trail.elapsed += dt;
+
+            if (enemyRoot) {
+                const radiusXSq = trail.radiusX * trail.radiusX;
+                const radiusYSq = trail.radiusY * trail.radiusY;
+                for (const enemyNode of enemyRoot.children) {
+                    const enemy = enemyNode.getComponent(Enemy);
+                    if (!enemy || enemy.isDead || enemy.isDyingState) {
+                        continue;
+                    }
+
+                    const dx = enemyNode.worldPosition.x - trail.worldPosition.x;
+                    const dy = enemyNode.worldPosition.y - trail.worldPosition.y;
+                    const ellipseFactor = (dx * dx) / Math.max(1, radiusXSq) + (dy * dy) / Math.max(1, radiusYSq);
+                    if (ellipseFactor <= 1) {
+                        enemy.applyMovementDebuff(this.trailSlowDuration, enemy.isBoss ? Math.max(0.58, this.trailSlowMultiplier + 0.18) : this.trailSlowMultiplier);
+                    }
+                }
+            }
+
+            if (trail.elapsed >= trail.duration) {
+                trail.node.destroy();
+                this.trailStates.splice(i, 1);
+                continue;
+            }
+
+            this.redrawTrail(trail, 1 - trail.elapsed / Math.max(0.001, trail.duration));
+        }
+    }
+
+    private spawnTrailAlongMovement(): void {
+        this.distanceSinceTrailSpawn += this.tempMoveDelta.length();
+        if (this.distanceSinceTrailSpawn < this.trailSpawnInterval) {
+            return;
+        }
+
+        this.distanceSinceTrailSpawn = 0;
+        this.spawnTrailPatch(this.ghostPosition);
+    }
+
+    private spawnTrailPatch(worldPosition: Vec3): void {
+        if (!this.summonParent) {
+            return;
+        }
+
+        const node = new Node('MopGhostTrail');
+        const graphics = node.addComponent(Graphics);
+        const transform = node.addComponent(UITransform);
+        transform.setContentSize(this.trailLength * 2, this.trailWidth * 2);
+        node.parent = this.summonParent;
+
+        Vec3.subtract(this.tempLocalPosition, worldPosition, this.summonParent.worldPosition);
+        node.setPosition(this.tempLocalPosition);
+        node.setRotationFromEuler(0, 0, Math.atan2(this.attackDirection.y, this.attackDirection.x) * 180 / Math.PI);
+
+        const trail: MopTrailState = {
+            node,
+            graphics,
+            worldPosition: new Vec3(worldPosition.x, worldPosition.y, worldPosition.z),
+            radiusX: this.trailLength * 0.5,
+            radiusY: this.trailWidth * 0.5,
+            elapsed: 0,
+            duration: this.trailDuration,
+        };
+
+        this.redrawTrail(trail, 1);
+        this.trailStates.push(trail);
+    }
+
+    private redrawTrail(trail: MopTrailState, opacityFactor: number): void {
+        const alpha = Math.max(28, Math.min(180, Math.round(150 * opacityFactor)));
+        trail.graphics.clear();
+        trail.graphics.fillColor = new Color(72, 182, 255, alpha);
+        trail.graphics.roundRect(-trail.radiusX, -trail.radiusY, trail.radiusX * 2, trail.radiusY * 2, trail.radiusY * 0.8);
+        trail.graphics.fill();
+    }
+
+    private syncGhostToWorld(worldPos: Vec3): void {
+        if (!this.ghostVisual || !this.summonParent) {
+            return;
+        }
+
+        Vec3.subtract(this.tempLocalPosition, worldPos, this.summonParent.worldPosition);
+        this.ghostVisual.setPosition(this.tempLocalPosition);
+    }
+
+    private moveGhostTowards(targetWorldPos: Vec3, speed: number, dt: number): boolean {
+        const ownerPos = this.ownerNode?.worldPosition;
+        if (ownerPos) {
+            this.clampWithinLeash(ownerPos, targetWorldPos);
+        }
+
+        Vec3.subtract(this.tempMoveDelta, targetWorldPos, this.ghostPosition);
+        const distance = this.tempMoveDelta.length();
+        if (distance <= 0.001) {
+            this.ghostPosition.set(targetWorldPos);
+            this.syncGhostToWorld(this.ghostPosition);
+            return true;
+        }
+
+        const maxStep = Math.max(0, speed) * dt;
+        if (distance <= maxStep) {
+            this.ghostPosition.set(targetWorldPos);
+            this.syncGhostToWorld(this.ghostPosition);
+            return true;
+        }
+
+        this.tempMoveDelta.multiplyScalar(maxStep / distance);
+        this.ghostPosition.add(this.tempMoveDelta);
+        this.syncGhostToWorld(this.ghostPosition);
+        return false;
+    }
+
+    private clampWithinLeash(ownerWorldPos: Vec3, targetWorldPos: Vec3): void {
+        Vec3.subtract(this.tempOwnerOffset, targetWorldPos, ownerWorldPos);
+        const distance = this.tempOwnerOffset.length();
+        if (distance > this.maxLeashRadius) {
+            this.tempOwnerOffset.multiplyScalar(this.maxLeashRadius / distance);
+            targetWorldPos.set(ownerWorldPos.x + this.tempOwnerOffset.x, ownerWorldPos.y + this.tempOwnerOffset.y, 0);
+            return;
+        }
+
+        if (distance > 0.0001 && distance < this.minPlayerClearRadius) {
+            this.tempOwnerOffset.multiplyScalar(this.minPlayerClearRadius / distance);
+            targetWorldPos.set(ownerWorldPos.x + this.tempOwnerOffset.x, ownerWorldPos.y + this.tempOwnerOffset.y, 0);
+            return;
+        }
+
+        if (distance <= 0.0001) {
+            targetWorldPos.set(ownerWorldPos.x + this.minPlayerClearRadius, ownerWorldPos.y, 0);
+        }
+    }
+
+    private pickStandbyOffset(): void {
+        const angle = this.getCurrentRelativeAngle(this.ownerNode?.worldPosition ?? Vec3.ZERO) + (Math.random() - 0.5) * Math.PI * 0.55;
+        const radius = this.standbyRadius * (0.72 + Math.random() * 0.22);
+        this.standbyOffset.set(Math.cos(angle) * radius, Math.sin(angle) * radius, 0);
+    }
+
+    private getCurrentRelativeAngle(ownerWorldPos: Vec3): number {
+        Vec3.subtract(this.tempOwnerOffset, this.ghostPosition, ownerWorldPos);
+        if (this.tempOwnerOffset.lengthSqr() <= 0.0001) {
+            return randomAngle();
+        }
+
+        return Math.atan2(this.tempOwnerOffset.y, this.tempOwnerOffset.x);
+    }
+
+    private playGhostAnimation(preferredClipName: string): void {
+        if (!this.ghostAnimations.length) {
+            return;
+        }
+
+        for (const animation of this.ghostAnimations) {
+            const animationAny = animation as any;
+            const clips = (animationAny.clips as Array<{ name?: string }> | undefined) ?? [];
+            const clip = clips.find(item => item?.name === preferredClipName) ?? animationAny.defaultClip ?? clips[0] ?? null;
+            if (!clip) {
+                continue;
+            }
+
+            animation.stop();
+            if (clip.name) {
+                animation.play(clip.name);
+            } else {
+                animation.play();
+            }
+        }
+    }
+
+    private configureGhostVisualCollision(): void {
+        if (!this.ghostVisual || !this.ghostVisual.body) {
+            return;
+        }
+
+        this.ghostVisual.trigger = false;
+        this.ghostVisual.group = PhysicsSystem.PhysicsGroup.DEFAULT;
+        this.ghostVisual.body.group = PhysicsSystem.PhysicsGroup.DEFAULT;
+        this.ghostVisual.body.mask = 0;
+    }
+
+    private clearGhost(): void {
+        if (this.ghostVisual) {
+            tween(this.ghostVisual.node).stop();
+            Skill.put(this.ghostVisual);
+            this.ghostVisual = null;
+        }
+
+        for (const trail of this.trailStates) {
+            trail.node.destroy();
+        }
+        this.trailStates.length = 0;
+
+        this.ownerNode = null;
+        this.summonParent = null;
+        this.ghostAnimations = [];
+        this.isSummoned = false;
+        this.isAttacking = false;
+        this.summonElapsed = 0;
+        this.attackElapsed = 0;
+        this.distanceSinceTrailSpawn = 0;
+        this.hitEnemiesThisDash.clear();
+        this.ghostPosition.set(Vec3.ZERO);
     }
 }

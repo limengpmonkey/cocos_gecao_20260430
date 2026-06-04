@@ -50,6 +50,8 @@ export type SkillPrefabResolveSource =
 export interface SkillVisualPayload {
     /** 用于该次技能释放的投射/特效预制体 */
     projectilePrefab: import('cc').Prefab | null;
+    /** 用于该次技能释放的范围/冲击特效预制体 */
+    impactPrefab?: import('cc').Prefab | null;
     /** 记录配置命中来源，便于排查配置问题 */
     source: SkillPrefabResolveSource;
     /** 当前释放技能 id */

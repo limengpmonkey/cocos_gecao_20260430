@@ -274,6 +274,10 @@ export class Enemy extends cObject {
         }
     }
 
+    applyStun(duration: number): void {
+        this.applyMovementDebuff(duration, 0);
+    }
+
     setSuctionDeathTarget(worldTarget: Vec3, duration: number = 0.28): void {
         this._pendingSuctionDeathWorldTarget.set(worldTarget);
         this._pendingSuctionDeathDuration = Math.max(0.05, duration);

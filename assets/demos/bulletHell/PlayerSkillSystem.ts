@@ -135,7 +135,6 @@ export class PlayerSkillSystem extends Component {
      */
     private onSkillSelect(event: SkillSelectEventData): void {
         const skillId = event.skillId;
-        const isFirstSelectedSkill = this.skillLevels.size <= 0;
         const currentLevel = this.skillLevels.get(skillId) || 0;
         const newLevel = currentLevel + 1;
         
@@ -146,11 +145,6 @@ export class PlayerSkillSystem extends Component {
         
         // 应用技能效果
         this.applySkillEffect(skillId, newLevel);
-
-        if (isFirstSelectedSkill) {
-            Player.inst?.disableDefaultGunFire();
-            console.log('[PlayerSkillSystem] 首次选择技能后，已关闭默认子弹发射');
-        }
     }
     
     /**

@@ -37,6 +37,9 @@ class SkillVisualBinding {
     @property({ type: Prefab, tooltip: '该技能的默认 Prefab（当未命中分级配置时使用）' })
     defaultPrefab: Prefab = null;
 
+    @property({ type: Prefab, tooltip: '该技能的冲击波/范围表现 Prefab（可选，例如压力罐爆炸范围）' })
+    impactPrefab: Prefab = null;
+
     @property({
         type: [SkillLevelPrefabBinding],
         tooltip: '按等级配置 Prefab。优先精确等级，其次使用不超过当前等级的最高配置。'
@@ -200,6 +203,7 @@ export class SkillManager extends Component {
             payload: {
                 visual: {
                     projectilePrefab: prefabToUse,
+                    impactPrefab: resolvedVisual.impactPrefab,
                     source: resolvedVisual.source,
                     skillId: skill.id,
                     skillLevel: skill.level,
@@ -250,22 +254,22 @@ export class SkillManager extends Component {
         return bestPrefab;
     }
 
-    private resolveSkillVisual(skillId: string, level: number): { prefab: Prefab | null; source: SkillPrefabResolveSource } {
+    private resolveSkillVisual(skillId: string, level: number): { prefab: Prefab | null; impactPrefab: Prefab | null; source: SkillPrefabResolveSource } {
         const visualBinding = this.getSkillVisualBinding(skillId);
         const levelPrefab = this.getLevelPrefab(visualBinding, level);
         if (levelPrefab) {
-            return { prefab: levelPrefab, source: 'skill-level' };
+            return { prefab: levelPrefab, impactPrefab: visualBinding?.impactPrefab ?? null, source: 'skill-level' };
         }
 
         if (visualBinding?.defaultPrefab) {
-            return { prefab: visualBinding.defaultPrefab, source: 'skill-default' };
+            return { prefab: visualBinding.defaultPrefab, impactPrefab: visualBinding.impactPrefab ?? null, source: 'skill-default' };
         }
 
         if (this.skillPrefab) {
-            return { prefab: this.skillPrefab, source: 'global-default' };
+            return { prefab: this.skillPrefab, impactPrefab: visualBinding?.impactPrefab ?? null, source: 'global-default' };
         }
 
-        return { prefab: null, source: 'none' };
+        return { prefab: null, impactPrefab: visualBinding?.impactPrefab ?? null, source: 'none' };
     }
 
     private validateSkillVisualBindings(): void {
@@ -329,6 +333,7 @@ export class SkillManager extends Component {
             payload: {
                 visual: {
                     projectilePrefab: resolvedVisual.prefab,
+                    impactPrefab: resolvedVisual.impactPrefab,
                     source: resolvedVisual.source,
                     skillId: summonSkill.id,
                     skillLevel: summonSkill.level,
