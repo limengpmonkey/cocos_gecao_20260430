@@ -52,11 +52,11 @@
         "__id__": 108
       },
       {
-        "__id__": 116
+        "__id__": 120
       }
     ],
     "_prefab": {
-      "__id__": 118
+      "__id__": 122
     },
     "_lpos": {
       "__type__": "cc.Vec3",
@@ -1589,6 +1589,18 @@
       },
       {
         "__id__": 115
+      },
+      {
+        "__id__": 116
+      },
+      {
+        "__id__": 117
+      },
+      {
+        "__id__": 118
+      },
+      {
+        "__id__": 119
       }
     ],
     "_id": ""
@@ -1661,6 +1673,52 @@
     "levelPrefabs": []
   },
   {
+    "__type__": "SkillVisualBinding",
+    "skillId": "cleaning_robot",
+    "defaultPrefab": {
+      "__uuid__": "a595d910-e0bf-428d-bce7-1fd8e39178bf",
+      "__expectedType__": "cc.Prefab"
+    },
+    "impactPrefab": {
+      "__uuid__": "a58ddfad-3c57-4100-a41c-fa48094e4bad",
+      "__expectedType__": "cc.Prefab"
+    },
+    "levelPrefabs": []
+  },
+  {
+    "__type__": "SkillVisualBinding",
+    "skillId": "bubble_shield",
+    "defaultPrefab": {
+      "__uuid__": "b2e21b18-8f00-463e-a742-5ed1aeef04e1",
+      "__expectedType__": "cc.Prefab"
+    },
+    "impactPrefab": null,
+    "levelPrefabs": []
+  },
+  {
+    "__type__": "SkillVisualBinding",
+    "skillId": "static_emitter",
+    "defaultPrefab": {
+      "__uuid__": "34002476-c203-454e-8fdf-a3606ab7adce",
+      "__expectedType__": "cc.Prefab"
+    },
+    "impactPrefab": {
+      "__uuid__": "4b42b250-6bcb-4c49-8108-85ae61445258",
+      "__expectedType__": "cc.Prefab"
+    },
+    "levelPrefabs": []
+  },
+  {
+    "__type__": "SkillVisualBinding",
+    "skillId": "purification_tower",
+    "defaultPrefab": {
+      "__uuid__": "267f5032-3aaa-49ef-b011-597707cb3e4e",
+      "__expectedType__": "cc.Prefab"
+    },
+    "impactPrefab": null,
+    "levelPrefabs": []
+  },
+  {
     "__type__": "bb294fbmVtEQpXp7XW4/6vb",
     "_name": "",
     "_objFlags": 0,
@@ -1669,7 +1727,7 @@
     },
     "_enabled": true,
     "__prefab": {
-      "__id__": 117
+      "__id__": 121
     },
     "_id": ""
   },
@@ -1688,16 +1746,16 @@
     "fileId": "c46/YsCPVOJYA4mWEpNYRx",
     "targetOverrides": [
       {
-        "__id__": 119
+        "__id__": 123
       },
       {
-        "__id__": 122
+        "__id__": 126
       },
       {
-        "__id__": 125
+        "__id__": 129
       },
       {
-        "__id__": 128
+        "__id__": 132
       }
     ],
     "nestedPrefabInstanceRoots": [
@@ -1718,7 +1776,7 @@
       "__id__": 26
     },
     "sourceInfo": {
-      "__id__": 120
+      "__id__": 124
     },
     "propertyPath": [
       "point"
@@ -1727,7 +1785,7 @@
       "__id__": 26
     },
     "targetInfo": {
-      "__id__": 121
+      "__id__": 125
     }
   },
   {
@@ -1748,46 +1806,46 @@
       "__id__": 16
     },
     "sourceInfo": {
-      "__id__": 123
-    },
-    "propertyPath": [
-      "point"
-    ],
-    "target": {
-      "__id__": 16
-    },
-    "targetInfo": {
-      "__id__": 124
-    }
-  },
-  {
-    "__type__": "cc.TargetInfo",
-    "localID": [
-      "ca9UsKCwFHnpSSFV5foRqA"
-    ]
-  },
-  {
-    "__type__": "cc.TargetInfo",
-    "localID": [
-      "aeKJkhXXFNO4FlMN9+sasK"
-    ]
-  },
-  {
-    "__type__": "cc.TargetOverrideInfo",
-    "source": {
-      "__id__": 49
-    },
-    "sourceInfo": {
-      "__id__": 126
-    },
-    "propertyPath": [
-      "point"
-    ],
-    "target": {
-      "__id__": 49
-    },
-    "targetInfo": {
       "__id__": 127
+    },
+    "propertyPath": [
+      "point"
+    ],
+    "target": {
+      "__id__": 16
+    },
+    "targetInfo": {
+      "__id__": 128
+    }
+  },
+  {
+    "__type__": "cc.TargetInfo",
+    "localID": [
+      "ca9UsKCwFHnpSSFV5foRqA"
+    ]
+  },
+  {
+    "__type__": "cc.TargetInfo",
+    "localID": [
+      "aeKJkhXXFNO4FlMN9+sasK"
+    ]
+  },
+  {
+    "__type__": "cc.TargetOverrideInfo",
+    "source": {
+      "__id__": 49
+    },
+    "sourceInfo": {
+      "__id__": 130
+    },
+    "propertyPath": [
+      "point"
+    ],
+    "target": {
+      "__id__": 49
+    },
+    "targetInfo": {
+      "__id__": 131
     }
   },
   {
@@ -1808,7 +1866,7 @@
       "__id__": 72
     },
     "sourceInfo": {
-      "__id__": 129
+      "__id__": 133
     },
     "propertyPath": [
       "point"
@@ -1817,7 +1875,7 @@
       "__id__": 72
     },
     "targetInfo": {
-      "__id__": 130
+      "__id__": 134
     }
   },
   {
