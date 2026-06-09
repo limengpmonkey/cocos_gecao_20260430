@@ -124,6 +124,9 @@ export class Player extends cObject {
     /** 临时增伤倍率（1 = 无增伤） */
     private _temporaryDamageMultiplier = 1;
     private _temporaryDamageTimeLeft = 0;
+
+    /** 受伤倍率（1 = 全额受伤，0.7 = 30% 减伤） */
+    private _incomingDamageMultiplier = 1;
     
     // ================== 血量相关Getter ==================
     get currentHp(): number { return this._currentHp; }
@@ -259,15 +262,15 @@ export class Player extends cObject {
         
         console.log(`玩家受到 ${damage} 点伤害，攻击者: ${attacker?.name || "未知"}`);
         
-        let actualDamage = damage;
+        let actualDamage = Math.max(0, damage * this._incomingDamageMultiplier);
         
         // 先扣除护盾
         if (this.shield > 0) {
-            if (this.shield >= damage) {
-                this.shield -= damage;
+            if (this.shield >= actualDamage) {
+                this.shield -= actualDamage;
                 actualDamage = 0;
             } else {
-                actualDamage = damage - this.shield;
+                actualDamage -= this.shield;
                 this.shield = 0;
             }
         }
@@ -850,6 +853,14 @@ export class Player extends cObject {
         this._temporaryDamageMultiplier = Math.max(this._temporaryDamageMultiplier, multiplier);
         this._temporaryDamageTimeLeft = Math.max(this._temporaryDamageTimeLeft, duration);
         console.log(`[玩家] 获得临时增伤：x${this._temporaryDamageMultiplier.toFixed(2)}，持续 ${this._temporaryDamageTimeLeft.toFixed(1)}s`);
+    }
+
+    public setIncomingDamageMultiplier(multiplier: number): void {
+        this._incomingDamageMultiplier = Math.max(0, Math.min(1, multiplier));
+    }
+
+    public getIncomingDamageMultiplier(): number {
+        return this._incomingDamageMultiplier;
     }
 
     public getDamageMultiplier(): number {

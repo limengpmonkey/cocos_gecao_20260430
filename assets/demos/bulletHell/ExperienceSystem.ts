@@ -66,6 +66,16 @@ export class ExperienceSystem extends Component {
         this.refreshUI(true);
     }
 
+    /** 【测试】直接将玩家等级设为指定值，不触发升级选技能事件。 */
+    public debugSetLevel(targetLevel: number): void {
+        const level = Math.max(1, Math.floor(targetLevel));
+        this._currentExp = 0;
+        this._currentLevel = level;
+        this._expToNextLevel = this.computeExpToNextLevel(this._currentLevel);
+        this.refreshUI(true);
+        console.log(`[ExperienceSystem] 测试模式：玩家等级已设为 ${level}`);
+    }
+
     configureExpCurve(curve: ExpCurvePoint[]): void {
         this._expCurve = Array.isArray(curve) ? [...curve] : [];
         this._expToNextLevel = this.computeExpToNextLevel(this._currentLevel);

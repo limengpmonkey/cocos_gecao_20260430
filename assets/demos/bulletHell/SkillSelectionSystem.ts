@@ -125,10 +125,22 @@ export class SkillSelectionSystem extends Component {
     debugForceSingleSkillId: string = '';
 
     /**
+     * 【测试用】技能伤害总开关，默认开启。关闭后所有技能不再造成伤害（保留击退/眩晕/吸附等表现）。
+     */
+    @property({ tooltip: '【测试】技能伤害总开关。开启=正常造成伤害，关闭=仅保留表现' })
+    debugSkillDamageEnabled: boolean = true;
+
+    /**
      * 【测试用】关闭当前单技能测试目标的伤害，仅保留表现和行为。
      */
     @property({ tooltip: '【测试】关闭当前单技能测试目标的伤害。开启后，仅对 debugForceSingleSkillId 指定的技能生效。' })
     debugDisableDamageForSingleSkill: boolean = false;
+
+    /**
+     * 【测试用】开局直达 10 级：玩家等级设为 10、开局弹出选技能、选中技能直接为 10 级（终阶）。
+     */
+    @property({ tooltip: '【测试】开局直达10级：玩家等级10 + 开局选技能 + 技能直接10级' })
+    debugStartAtLevel10: boolean = false;
 
     /**
      * 强制技能轮转起点。
@@ -156,6 +168,7 @@ export class SkillSelectionSystem extends Component {
         // 若配置了独立弹窗节点（推荐），隐藏时不应影响 selectionPanel 下的常驻 HUD。
         this._useSelectionPanelActiveFallback = !(this.bgNode || this.optionsContainer);
         this.setupEventListeners();
+        this.scheduleOnce(this.applyDebugStartAtLevel10, 0.35);
     }
 
     onDestroy(): void {
@@ -349,6 +362,10 @@ export class SkillSelectionSystem extends Component {
     }
 
     public isSkillDamageDisabledForSkill(skillId: string | null | undefined): boolean {
+        if (!this.debugSkillDamageEnabled) {
+            return true;
+        }
+
         if (!this.debugDisableDamageForSingleSkill) {
             return false;
         }
@@ -360,6 +377,37 @@ export class SkillSelectionSystem extends Component {
 
     public setSingleSkillDamageDisabled(enabled: boolean): void {
         this.debugDisableDamageForSingleSkill = !!enabled;
+    }
+
+    public resolveGrantedSkillLevel(currentLevel: number, maxLevel: number = 10): number {
+        const normalizedMaxLevel = Math.max(1, Math.floor(maxLevel));
+        if (!this.debugStartAtLevel10) {
+            return Math.min(normalizedMaxLevel, currentLevel + 1);
+        }
+
+        const targetLevel = 10;
+        if (currentLevel < targetLevel) {
+            return Math.min(normalizedMaxLevel, targetLevel);
+        }
+
+        return Math.min(normalizedMaxLevel, currentLevel + 1);
+    }
+
+    private applyDebugStartAtLevel10(): void {
+        if (!this.debugStartAtLevel10) {
+            return;
+        }
+
+        ExperienceSystem.inst?.debugSetLevel(10);
+
+        const skillOptions = this.generateSkillOptions(3, 10);
+        if (skillOptions.length <= 0) {
+            console.warn('[SkillSelectionSystem] 测试模式：无法生成开局技能选项');
+            return;
+        }
+
+        console.log('[SkillSelectionSystem] 测试模式：开局弹出 10 级技能选择');
+        this.show(skillOptions, 10);
     }
     
     /**
@@ -708,6 +756,10 @@ export class SkillSelectionSystem extends Component {
         };
 
         const currentLevel = Math.max(0, skillSystem?.getSkillLevel?.(skillId) ?? 0);
+        if (this.debugStartAtLevel10 && currentLevel < 10) {
+            return 10;
+        }
+
         return currentLevel + 1;
     }
 

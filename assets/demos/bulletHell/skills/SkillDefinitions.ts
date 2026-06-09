@@ -11,7 +11,7 @@
  * 这些实现侧重于可扩展性，能为后续的技能融合、技能树等功能提供基础。
  */
 
-import { Animation, Color, Component, Graphics, Vec3, Node, ParticleSystem2D, Quat, Sprite, tween, PhysicsSystem, UITransform, view } from 'cc';
+import { Animation, Color, Component, Graphics, Vec3, Node, ParticleSystem2D, Quat, Sprite, instantiate, tween, PhysicsSystem, UITransform, view } from 'cc';
 import { ActiveSkill } from './ActiveSkill';
 import { BoostSkill } from './BoostSkill';
 import { SummonSkill } from './SummonSkill';
@@ -23,6 +23,7 @@ import { Bullet } from '../../bulletHell/bullet';
 import { Skill } from '../../bulletHell/skill';
 import { SkillBeam } from '../../bulletHell/skillBeam';
 import { Enemy } from '../enemy';
+import { Player } from '../player';
 import { TemporaryPickup } from '../TemporaryPickup';
 
 const tempBeamRot = new Quat();
@@ -59,6 +60,35 @@ interface PressureCanisterState {
     explosionDuration: number;
 }
 
+interface VacuumVortexFieldState {
+    worldPosition: Vec3;
+    visual: Skill | null;
+    visualBaseScale: Vec3;
+    elapsed: number;
+    duration: number;
+    radius: number;
+    pullStrength: number;
+    tickDamage: number;
+    tickElapsed: number;
+    stunPulse: number;
+}
+
+interface BroomWindWallState {
+    node: Node;
+    graphics: Graphics;
+    worldPosition: Vec3;
+    radius: number;
+    elapsed: number;
+    duration: number;
+}
+
+interface TrashBagFieldInstanceState {
+    center: Vec3;
+    radius: number;
+    visual: Skill | null;
+    visualBaseScale: number;
+}
+
 interface MopTrailState {
     node: Node;
     graphics: Graphics;
@@ -67,6 +97,11 @@ interface MopTrailState {
     radiusY: number;
     elapsed: number;
     duration: number;
+    isMergedZone: boolean;
+    tickDamage: number;
+    tickElapsed: number;
+    zoneSlowMultiplier: number;
+    mergeCount: number;
 }
 
 interface StaticArcStrikeState {
@@ -80,6 +115,16 @@ interface StaticArcStrikeState {
     damage: number;
     hasStarted: boolean;
     hasAppliedDamage: boolean;
+    isSecondary?: boolean;
+}
+
+interface StaticGroundPatchState {
+    worldPosition: Vec3;
+    visual: Skill | null;
+    elapsed: number;
+    duration: number;
+    radius: number;
+    damageTickElapsed: number;
 }
 
 function spawnProjectile(opts: ProjectileOptions) {
@@ -117,6 +162,10 @@ const commonActiveSkillConfig: Partial<SkillConfig> = {
 };
 
 export class WhirlwindBroomSkill extends ActiveSkill {
+    private static readonly WIND_WALL_SPAWN_ANGLE_STEP = 0.4;
+    private static readonly WIND_WALL_COLOR = new Color(142, 232, 188);
+    private static readonly MAX_WIND_WALLS = 10;
+
     static CONFIG: SkillConfig = {
         id: 'whirlwind_broom',
         name: '旋风扫把',
@@ -132,14 +181,26 @@ export class WhirlwindBroomSkill extends ActiveSkill {
     private minVisualDuration = 0.45;
     private orbitRadius = 40;
     private damageTickInterval = 0.08;
+    private orbitLaps = 1;
+    private secondLapDamageMultiplier = 1;
+    private windWallDuration = 0;
+    private windWallRadius = 0;
+    private windWallSlowMultiplier = 0.58;
+    private windWallSlowDuration = 0.28;
 
     private activeOwnerNode: Node | null = null;
     private activeBroomVisual: Skill | null = null;
+    private activeBroomParent: Node | null = null;
     private orbitElapsed = 0;
     private damageTickElapsed = 0;
     private orbitStartAngle = -Math.PI * 0.5;
+    private lastWindWallSpawnAngle = Number.NaN;
     private readonly orbitPosition = new Vec3();
     private readonly currentFacing = new Vec3(1, 0, 0);
+    private readonly broomBaseScale = new Vec3(1, 1, 1);
+    private readonly tempLocalPosition = new Vec3();
+    private readonly tempBroomScale = new Vec3(1, 1, 1);
+    private readonly windWallStates: BroomWindWallState[] = [];
 
     constructor(level: number = 1) {
         super(WhirlwindBroomSkill.CONFIG, level);
@@ -153,6 +214,29 @@ export class WhirlwindBroomSkill extends ActiveSkill {
         this.slashAngle = Math.PI / 3 + (this.level - 1) * (Math.PI / 18); // 每级增加 10°
         this.baseDamage = 30 + this.level * 5;
         this.orbitRadius = 40;
+        this.orbitLaps = 1;
+        this.secondLapDamageMultiplier = 1;
+        this.windWallDuration = 0;
+        this.windWallRadius = 0;
+        this.applyTransformBonuses();
+    }
+
+    private applyTransformBonuses(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        this.orbitLaps = 2;
+        this.slashDuration = 0.92;
+        this.secondLapDamageMultiplier = 1.5;
+        this.orbitRadius = 48;
+        this.slashAngle *= 1.12;
+        this.damageTickInterval = Math.max(0.06, this.damageTickInterval * 0.9);
+        this.windWallDuration = 2;
+        this.windWallRadius = Math.max(28, this.slashRange * 0.2);
+        this.windWallSlowMultiplier = 0.52;
+        this.windWallSlowDuration = 0.34;
+        this.cooldown = Math.max(0.75, this.cooldown * 0.92);
     }
 
     public levelUp(): void {
@@ -160,8 +244,19 @@ export class WhirlwindBroomSkill extends ActiveSkill {
         this.updateByLevel();
     }
 
+    public getDescription(): string {
+        const transformedText = this.isTransformed
+            ? '终阶「龙卷清扫」：绕玩家连转两圈，轨迹留下风墙减速，第二圈伤害大幅提升。'
+            : '满级后进化为龙卷清扫，双圈挥砍并留下短暂风墙。';
+        const overloadText = this.isTransformed
+            ? `风墙持续 ${this.windWallDuration.toFixed(1)}s，第二圈伤害 ×${this.secondLapDamageMultiplier.toFixed(1)}。`
+            : '';
+        return `扫把绕玩家旋转挥砍，范围 ${Math.round(this.slashRange)}、扇形 ${Math.round(this.slashAngle * 180 / Math.PI)}°，单次 ${this.baseDamage} 伤害。${overloadText}${transformedText}`;
+    }
+
     public update(dt: number): void {
         super.update(dt);
+        this.updateWindWalls(dt);
 
         if (!this.activeOwnerNode || !this.activeBroomVisual) {
             return;
@@ -170,15 +265,22 @@ export class WhirlwindBroomSkill extends ActiveSkill {
         this.orbitElapsed += dt;
         this.damageTickElapsed += dt;
 
-        const progress = Math.min(1, this.orbitElapsed / this.slashDuration);
-        const orbitAngle = this.orbitStartAngle + progress * Math.PI * 2;
+        const totalDuration = this.slashDuration * this.orbitLaps;
+        const progress = Math.min(1, this.orbitElapsed / totalDuration);
+        const orbitAngle = this.orbitStartAngle + progress * Math.PI * 2 * this.orbitLaps;
+        const currentLap = Math.min(this.orbitLaps - 1, Math.floor(progress * this.orbitLaps));
 
         this.currentFacing.set(Math.cos(orbitAngle), Math.sin(orbitAngle), 0);
-        this.updateBroomOrbitTransform(this.currentFacing);
+        this.updateBroomOrbitTransform(this.currentFacing, currentLap);
+
+        if (this.isTransformed && this.windWallDuration > 0) {
+            this.maybeSpawnWindWall(orbitAngle);
+        }
 
         while (this.damageTickElapsed >= this.damageTickInterval) {
             this.damageTickElapsed -= this.damageTickInterval;
-            this.applyOrbitDamage();
+            const damageMultiplier = currentLap >= 1 ? this.secondLapDamageMultiplier : 1;
+            this.applyOrbitDamage(damageMultiplier);
         }
 
         if (progress >= 1) {
@@ -209,24 +311,28 @@ export class WhirlwindBroomSkill extends ActiveSkill {
         broomVisual.init();
         broomVisual.disableAutoRotation = true;
         broomVisual.trigger = false;
-            broomVisual.lifeTime = 999999;
+        broomVisual.lifeTime = 999999;
         broomVisual.velocity.set(0, 0, 0);
-        broomVisual.setScale(new Vec3(1, 1, 1));
+        this.broomBaseScale.set(broomVisual.node.scale);
+        broomVisual.setScale(this.broomBaseScale);
 
         const broomNode = broomVisual.node;
         const animationDuration = this.playBroomAnimation(broomNode);
-        const cleanupDelay = Math.max(this.slashDuration, this.minVisualDuration, animationDuration);
+        const totalSlashDuration = this.slashDuration * this.orbitLaps;
+        const cleanupDelay = Math.max(totalSlashDuration, this.minVisualDuration, animationDuration);
 
         broomVisual.lifeTime = cleanupDelay + 0.1;
 
         this.activeOwnerNode = owner;
         this.activeBroomVisual = broomVisual;
+        this.activeBroomParent = parent;
         this.orbitElapsed = 0;
         this.damageTickElapsed = 0;
+        this.lastWindWallSpawnAngle = Number.NaN;
         this.orbitStartAngle = Math.atan2(facingDir.y, facingDir.x);
         this.currentFacing.set(facingDir.x, facingDir.y, 0);
-        this.updateBroomOrbitTransform(this.currentFacing);
-        this.applyOrbitDamage();
+        this.updateBroomOrbitTransform(this.currentFacing, 0);
+        this.applyOrbitDamage(1);
     }
 
     private getEnemiesInSlashRange(center: Vec3, facingDir: Vec3, range: number, angle: number): Enemy[] {
@@ -286,10 +392,9 @@ export class WhirlwindBroomSkill extends ActiveSkill {
         const rotationDeg = towardOwnerAngle * 180 / Math.PI - spriteTailAngleDeg;
 
         broomNode.setRotationFromEuler(0, 0, rotationDeg);
-        broomNode.setScale(new Vec3(1, 1, 1));
     }
 
-    private updateBroomOrbitTransform(facingDir: Vec3): void {
+    private updateBroomOrbitTransform(facingDir: Vec3, currentLap: number = 0): void {
         if (!this.activeOwnerNode || !this.activeBroomVisual) {
             return;
         }
@@ -303,10 +408,19 @@ export class WhirlwindBroomSkill extends ActiveSkill {
 
         const broomNode = this.activeBroomVisual.node;
         broomNode.setWorldPosition(this.orbitPosition);
+        const scaleBoost = this.isTransformed
+            ? (currentLap >= 1 ? 1.18 : 1.06)
+            : 1;
+        this.tempBroomScale.set(
+            this.broomBaseScale.x * scaleBoost,
+            this.broomBaseScale.y * scaleBoost,
+            this.broomBaseScale.z
+        );
         this.playSlashVisual(broomNode, facingDir);
+        broomNode.setScale(this.tempBroomScale);
     }
 
-    private applyOrbitDamage(): void {
+    private applyOrbitDamage(damageMultiplier: number = 1): void {
         if (!this.activeOwnerNode) {
             return;
         }
@@ -322,21 +436,141 @@ export class WhirlwindBroomSkill extends ActiveSkill {
             this.slashAngle
         );
 
+        const damage = Math.max(1, Math.round(this.baseDamage * damageMultiplier));
         for (const enemy of enemies) {
-            enemy.takeDamage(this.baseDamage, this.activeOwnerNode);
+            enemy.takeDamage(damage, this.activeOwnerNode);
         }
+    }
+
+    private maybeSpawnWindWall(orbitAngle: number): void {
+        if (!this.activeBroomParent) {
+            return;
+        }
+
+        if (Number.isNaN(this.lastWindWallSpawnAngle)) {
+            this.lastWindWallSpawnAngle = orbitAngle;
+            this.spawnWindWall(this.orbitPosition);
+            return;
+        }
+
+        let deltaAngle = Math.abs(orbitAngle - this.lastWindWallSpawnAngle);
+        if (deltaAngle > Math.PI) {
+            deltaAngle = Math.PI * 2 - deltaAngle;
+        }
+
+        if (deltaAngle < WhirlwindBroomSkill.WIND_WALL_SPAWN_ANGLE_STEP) {
+            return;
+        }
+
+        this.lastWindWallSpawnAngle = orbitAngle;
+        this.spawnWindWall(this.orbitPosition);
+    }
+
+    private spawnWindWall(worldPosition: Vec3): void {
+        if (!this.activeBroomParent || this.windWallDuration <= 0) {
+            return;
+        }
+
+        if (this.windWallStates.length >= WhirlwindBroomSkill.MAX_WIND_WALLS) {
+            const oldest = this.windWallStates.shift();
+            oldest?.node.destroy();
+        }
+
+        const node = new Node('BroomWindWall');
+        const graphics = node.addComponent(Graphics);
+        const transform = node.addComponent(UITransform);
+        const diameter = this.windWallRadius * 2;
+        transform.setContentSize(diameter, diameter);
+        node.parent = this.activeBroomParent;
+
+        Vec3.subtract(this.tempLocalPosition, worldPosition, this.activeBroomParent.worldPosition);
+        node.setPosition(this.tempLocalPosition);
+
+        const wall: BroomWindWallState = {
+            node,
+            graphics,
+            worldPosition: new Vec3(worldPosition.x, worldPosition.y, worldPosition.z),
+            radius: this.windWallRadius,
+            elapsed: 0,
+            duration: this.windWallDuration,
+        };
+
+        this.redrawWindWall(wall, 1);
+        this.windWallStates.push(wall);
+    }
+
+    private updateWindWalls(dt: number): void {
+        if (this.windWallStates.length <= 0) {
+            return;
+        }
+
+        const enemyRoot = BulletHell.inst?.objects;
+        for (let i = this.windWallStates.length - 1; i >= 0; i--) {
+            const wall = this.windWallStates[i];
+            wall.elapsed += dt;
+
+            if (enemyRoot) {
+                const radiusSq = wall.radius * wall.radius;
+                for (const enemyNode of enemyRoot.children) {
+                    const enemy = enemyNode.getComponent(Enemy);
+                    if (!enemy || enemy.isDead || enemy.isDyingState) {
+                        continue;
+                    }
+
+                    const dx = enemyNode.worldPosition.x - wall.worldPosition.x;
+                    const dy = enemyNode.worldPosition.y - wall.worldPosition.y;
+                    if (dx * dx + dy * dy <= radiusSq) {
+                        const bossSlow = Math.max(0.62, this.windWallSlowMultiplier + 0.14);
+                        enemy.applyMovementDebuff(
+                            this.windWallSlowDuration,
+                            enemy.isBoss ? bossSlow : this.windWallSlowMultiplier
+                        );
+                    }
+                }
+            }
+
+            if (wall.elapsed >= wall.duration) {
+                wall.node.destroy();
+                this.windWallStates.splice(i, 1);
+                continue;
+            }
+
+            this.redrawWindWall(wall, 1 - wall.elapsed / Math.max(0.001, wall.duration));
+        }
+    }
+
+    private redrawWindWall(wall: BroomWindWallState, opacityFactor: number): void {
+        const color = WhirlwindBroomSkill.WIND_WALL_COLOR;
+        const alpha = Math.max(18, Math.min(110, Math.round(88 * opacityFactor)));
+        wall.graphics.clear();
+        wall.graphics.fillColor = new Color(color.r, color.g, color.b, alpha);
+        wall.graphics.circle(0, 0, wall.radius);
+        wall.graphics.fill();
+        wall.graphics.strokeColor = new Color(210, 255, 230, Math.min(130, alpha + 24));
+        wall.graphics.lineWidth = 1.5;
+        wall.graphics.circle(0, 0, wall.radius);
+        wall.graphics.stroke();
+    }
+
+    private clearWindWalls(): void {
+        for (const wall of this.windWallStates) {
+            wall.node.destroy();
+        }
+        this.windWallStates.length = 0;
     }
 
     private clearActiveBroom(): void {
         if (this.activeBroomVisual) {
-                tween(this.activeBroomVisual.node).stop();
+            tween(this.activeBroomVisual.node).stop();
             Skill.put(this.activeBroomVisual);
             this.activeBroomVisual = null;
         }
 
         this.activeOwnerNode = null;
+        this.activeBroomParent = null;
         this.orbitElapsed = 0;
         this.damageTickElapsed = 0;
+        this.lastWindWallSpawnAngle = Number.NaN;
         this.currentFacing.set(1, 0, 0);
     }
 
@@ -1026,6 +1260,10 @@ export class HighPressureWaterGunSkill extends ActiveSkill {
 }
 
 export class TrashBagFieldSkill extends ActiveSkill {
+    private static readonly LANDFILL_FIELD_TINT = new Color(58, 72, 48);
+    private static readonly PLAYER_RADIUS_FALLBACK = 40;
+    private static readonly VISUAL_BASE_RADIUS_FALLBACK = 64;
+
     static CONFIG: SkillConfig = {
         id: 'trash_bag_field',
         name: '垃圾袋领域',
@@ -1035,19 +1273,28 @@ export class TrashBagFieldSkill extends ActiveSkill {
     } as SkillConfig;
 
     private duration = 5;
-    private radius = 120;
-    private readonly damagePerTick = 8;
-    private readonly tickInterval = 0.25;
-    private readonly visualBaseRadiusFallback = 120;
+    private fieldRadius = 40;
+    private fieldCount = 1;
+    private fieldSizeMultiplier = 1;
+    private randomFieldPlacement = false;
+    private transformRadiusFactor = 1;
+    private damagePerTick = 8;
+    private tickInterval = 0.25;
     private slowDuration = 0.36;
     private slowMultiplier = 0.76;
+    private imprisonEnabled = false;
+    private imprisonClampRadiusFactor = 0.94;
+    private imprisonEdgePushStrength = 165;
 
     private isFieldActive = false;
     private fieldElapsed = 0;
     private tickElapsed = 0;
     private fieldOwnerNode: Node | null = null;
-    private readonly fieldCenter = new Vec3();
-    private activeFieldVisual: Skill | null = null;
+    private readonly tempEnemyOffset = new Vec3();
+    private readonly tempInwardDirection = new Vec3();
+    private readonly tempFieldScale = new Vec3(1, 1, 1);
+    private readonly tempFieldCenter = new Vec3();
+    private readonly activeFields: TrashBagFieldInstanceState[] = [];
 
     constructor(level: number = 1) {
         super(TrashBagFieldSkill.CONFIG, level);
@@ -1056,16 +1303,72 @@ export class TrashBagFieldSkill extends ActiveSkill {
     }
 
     private updateByLevel() {
-        // 升级路线：仅提升范围与持续时间
-        this.radius = 120 + this.level * 14;
         this.duration = 4 + this.level * 0.8;
+        this.damagePerTick = 6 + Math.round(this.level * 1.35);
+        this.tickInterval = 0.25;
         this.slowDuration = 0.34 + this.level * 0.02;
         this.slowMultiplier = Math.max(0.48, 0.8 - this.level * 0.025);
+        this.transformRadiusFactor = 1;
+        this.imprisonEnabled = false;
+        this.applyFieldTierByLevel();
+        this.applyTransformBonuses();
+    }
+
+    private applyFieldTierByLevel(): void {
+        if (this.level <= 3) {
+            this.fieldCount = 1;
+            this.fieldSizeMultiplier = 1;
+            this.randomFieldPlacement = false;
+            return;
+        }
+
+        if (this.level <= 7) {
+            this.fieldCount = 2;
+            this.fieldSizeMultiplier = 1.5;
+            this.randomFieldPlacement = false;
+            return;
+        }
+
+        this.fieldCount = 3;
+        this.fieldSizeMultiplier = 2;
+        this.randomFieldPlacement = true;
+    }
+
+    private applyTransformBonuses(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        this.cooldown = Math.max(4.2, this.cooldown * 0.92);
+        this.transformRadiusFactor = 1.08;
+        this.duration += 1.0;
+        this.damagePerTick = Math.max(1, Math.round(this.damagePerTick * 1.75));
+        this.tickInterval = 0.22;
+        this.slowDuration += 0.06;
+        this.slowMultiplier = Math.max(0.36, this.slowMultiplier * 0.82);
+        this.imprisonEnabled = true;
+        this.imprisonClampRadiusFactor = 0.94;
+        this.imprisonEdgePushStrength = 185;
     }
 
     public levelUp(): void {
         super.levelUp();
         this.updateByLevel();
+    }
+
+    public getDescription(): string {
+        const tierText = this.level <= 3
+            ? 'Lv1-3 放置 1 个与角色等大的污染区。'
+            : this.level <= 7
+                ? 'Lv4-7 放置 2 个 1.5 倍大的污染区。'
+                : 'Lv8-10 随机放置 3 个 2 倍大的污染区。';
+        const transformedText = this.isTransformed
+            ? '终阶「垃圾填埋场」：非 Boss 敌人无法离开边缘。'
+            : '满级后进化为垃圾填埋场并禁锢圈内敌人。';
+        const overloadText = this.isTransformed
+            ? `填埋场每秒约 ${(this.damagePerTick / this.tickInterval).toFixed(0)} 点伤害，Boss 仅减速不禁锢。`
+            : '';
+        return `一次释放 ${this.fieldCount} 个污染区，持续 ${this.duration.toFixed(1)}s，单区半径约 ${Math.round(this.fieldRadius)}，每跳 ${this.damagePerTick} 伤害。${tierText}${overloadText}${transformedText}`;
     }
 
     public update(dt: number): void {
@@ -1077,10 +1380,15 @@ export class TrashBagFieldSkill extends ActiveSkill {
 
         this.fieldElapsed += dt;
         this.tickElapsed += dt;
+        this.syncFieldVisual();
 
         if (this.fieldElapsed >= this.duration) {
             this.clearField();
             return;
+        }
+
+        if (this.imprisonEnabled) {
+            this.applyFieldContainment();
         }
 
         while (this.tickElapsed >= this.tickInterval) {
@@ -1096,55 +1404,204 @@ export class TrashBagFieldSkill extends ActiveSkill {
         const visualParent = objectsParent?.parent ?? bulletsParent;
         const prefab = context.payload?.visual?.projectilePrefab ?? null;
 
-        //console.log(`[技能] 垃圾袋领域 (Lv${this.level}) 放置，持续 ${this.duration.toFixed(1)}s，范围 ${this.radius}`);
-
         this.clearField();
 
         this.fieldOwnerNode = context.ownerNode;
-        this.fieldCenter.set(origin);
+        this.fieldRadius = this.resolveFieldRadius(context.ownerNode);
         this.fieldElapsed = 0;
         this.tickElapsed = 0;
         this.isFieldActive = true;
 
-        // 立即结算一跳伤害，让技能触发反馈更直接。
-        this.applyAreaDamage();
+        const fieldCenters = this.buildFieldCenters(origin, this.fieldRadius);
+        for (const center of fieldCenters) {
+            const field: TrashBagFieldInstanceState = {
+                center: new Vec3(center.x, center.y, center.z),
+                radius: this.fieldRadius,
+                visual: null,
+                visualBaseScale: 1,
+            };
 
-        if (visualParent && prefab) {
-            const visual = Skill.get(prefab);
-            if (visual) {
-                visual.insert(visualParent);
-                visual.init();
+            if (visualParent && prefab) {
+                const visual = Skill.get(prefab);
+                if (visual) {
+                    visual.insert(visualParent);
+                    visual.init();
 
-                if (objectsParent && visual.node.parent === objectsParent.parent) {
-                    visual.node.setSiblingIndex(objectsParent.getSiblingIndex());
+                    if (objectsParent && visual.node.parent === objectsParent.parent) {
+                        visual.node.setSiblingIndex(objectsParent.getSiblingIndex());
+                    }
+
+                    Vec3.subtract(this.tempFieldCenter, field.center, visualParent.worldPosition);
+                    visual.setPosition(this.tempFieldCenter);
+                    visual.velocity.set(0, 0, 0);
+                    visual.lifeTime = this.duration + 0.1;
+                    visual.disableAutoRotation = true;
+                    visual.trigger = false;
+
+                    field.visualBaseScale = Math.max(0.1, field.radius / this.getTrashBagVisualBaseRadius(visual.node));
+                    this.tempFieldScale.set(field.visualBaseScale, field.visualBaseScale, 1);
+                    visual.setScale(this.tempFieldScale);
+                    this.tintFieldVisual(visual.node, this.isTransformed);
+                    field.visual = visual;
                 }
-
-                const localPos = new Vec3();
-                Vec3.subtract(localPos, this.fieldCenter, visualParent.worldPosition);
-                visual.setPosition(localPos);
-                visual.velocity.set(0, 0, 0);
-                visual.lifeTime = this.duration + 0.1;
-                visual.disableAutoRotation = true;
-                visual.trigger = false;
-
-                const scaleRatio = Math.max(0.1, this.radius / this.getTrashBagVisualBaseRadius(visual.node));
-                visual.setScale(new Vec3(scaleRatio, scaleRatio, 1));
-
-                this.activeFieldVisual = visual;
             }
+
+            this.activeFields.push(field);
         }
 
-        if (this.isTransformed) {
-            //console.log('[技能] 质变：垃圾填埋场（禁锢、持续伤害）');
-        }
+        this.applyAreaDamage();
     }
 
-    private applyAreaDamage(): void {
-        if (!this.fieldOwnerNode) {
+    private resolveFieldRadius(ownerNode: Node): number {
+        const playerRadius = this.getPlayerReferenceRadius(ownerNode);
+        return Math.max(24, Math.round(playerRadius * this.fieldSizeMultiplier * this.transformRadiusFactor));
+    }
+
+    private getPlayerReferenceRadius(ownerNode: Node): number {
+        const transform = ownerNode.getComponent(UITransform) ?? ownerNode.getComponentInChildren(UITransform);
+        if (!transform) {
+            return TrashBagFieldSkill.PLAYER_RADIUS_FALLBACK;
+        }
+
+        const worldScale = Math.max(ownerNode.worldScale.x, ownerNode.worldScale.y, 0.1);
+        return Math.max(
+            24,
+            Math.max(transform.contentSize.width, transform.contentSize.height) * 0.5 * worldScale
+        );
+    }
+
+    private getVisiblePlacementBounds(origin: Vec3, fieldRadius: number): {
+        minX: number;
+        maxX: number;
+        minY: number;
+        maxY: number;
+    } | null {
+        const visibleSize = view.getVisibleSize();
+        if (visibleSize.width <= 0 || visibleSize.height <= 0) {
+            return null;
+        }
+
+        const cameraPos = BulletHell.inst?.camera?.worldPosition ?? origin;
+        const edgeMargin = 16;
+        const inset = fieldRadius + edgeMargin;
+        const halfW = visibleSize.width * 0.5 - inset;
+        const halfH = visibleSize.height * 0.5 - inset;
+        if (halfW <= 12 || halfH <= 12) {
+            return null;
+        }
+
+        return {
+            minX: cameraPos.x - halfW,
+            maxX: cameraPos.x + halfW,
+            minY: cameraPos.y - halfH,
+            maxY: cameraPos.y + halfH,
+        };
+    }
+
+    private clampCenterToVisibleBounds(center: Vec3, fieldRadius: number, origin: Vec3): void {
+        const bounds = this.getVisiblePlacementBounds(origin, fieldRadius);
+        if (!bounds) {
             return;
         }
 
-        if (isSkillDamageDisabledForTesting(TrashBagFieldSkill.CONFIG.id)) {
+        center.x = Math.max(bounds.minX, Math.min(bounds.maxX, center.x));
+        center.y = Math.max(bounds.minY, Math.min(bounds.maxY, center.y));
+    }
+
+    private pickRandomCenterWithinVisibleBounds(
+        origin: Vec3,
+        fieldRadius: number,
+        bounds: { minX: number; maxX: number; minY: number; maxY: number }
+    ): Vec3 {
+        return new Vec3(
+            bounds.minX + Math.random() * (bounds.maxX - bounds.minX),
+            bounds.minY + Math.random() * (bounds.maxY - bounds.minY),
+            origin.z
+        );
+    }
+
+    private isCenterSeparatedFromExisting(
+        center: Vec3,
+        existingCenters: Vec3[],
+        minSeparation: number
+    ): boolean {
+        const minSeparationSq = minSeparation * minSeparation;
+        for (const existing of existingCenters) {
+            const dx = existing.x - center.x;
+            const dy = existing.y - center.y;
+            if (dx * dx + dy * dy < minSeparationSq) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    private buildFieldCenters(origin: Vec3, fieldRadius: number): Vec3[] {
+        const centers: Vec3[] = [];
+        if (this.fieldCount <= 1) {
+            const center = new Vec3(origin.x, origin.y, origin.z);
+            this.clampCenterToVisibleBounds(center, fieldRadius, origin);
+            centers.push(center);
+            return centers;
+        }
+
+        if (!this.randomFieldPlacement) {
+            const primary = new Vec3(origin.x, origin.y, origin.z);
+            this.clampCenterToVisibleBounds(primary, fieldRadius, origin);
+            centers.push(primary);
+
+            const angle = Math.random() * Math.PI * 2;
+            const distance = fieldRadius * (1.15 + Math.random() * 0.55);
+            const secondary = new Vec3(
+                origin.x + Math.cos(angle) * distance,
+                origin.y + Math.sin(angle) * distance,
+                origin.z
+            );
+            this.clampCenterToVisibleBounds(secondary, fieldRadius, origin);
+            centers.push(secondary);
+            return centers;
+        }
+
+        const bounds = this.getVisiblePlacementBounds(origin, fieldRadius);
+        const minSeparation = fieldRadius * 1.05;
+        const maxAttempts = 32;
+        if (bounds) {
+            for (let attempt = 0; attempt < maxAttempts && centers.length < this.fieldCount; attempt++) {
+                const candidate = this.pickRandomCenterWithinVisibleBounds(origin, fieldRadius, bounds);
+                if (!this.isCenterSeparatedFromExisting(candidate, centers, minSeparation)) {
+                    continue;
+                }
+
+                centers.push(candidate);
+            }
+        }
+
+        while (centers.length < this.fieldCount) {
+            const angle = Math.random() * Math.PI * 2;
+            const distance = fieldRadius * (0.8 + centers.length * 0.75);
+            const fallback = new Vec3(
+                origin.x + Math.cos(angle) * distance,
+                origin.y + Math.sin(angle) * distance,
+                origin.z
+            );
+            this.clampCenterToVisibleBounds(fallback, fieldRadius, origin);
+            if (this.isCenterSeparatedFromExisting(fallback, centers, minSeparation)) {
+                centers.push(fallback);
+            } else if (bounds) {
+                const boundedFallback = this.pickRandomCenterWithinVisibleBounds(origin, fieldRadius, bounds);
+                this.clampCenterToVisibleBounds(boundedFallback, fieldRadius, origin);
+                centers.push(boundedFallback);
+            } else {
+                centers.push(fallback);
+            }
+        }
+
+        return centers;
+    }
+
+    private applyAreaDamage(): void {
+        if (!this.fieldOwnerNode || this.activeFields.length <= 0) {
             return;
         }
 
@@ -1153,22 +1610,128 @@ export class TrashBagFieldSkill extends ActiveSkill {
             return;
         }
 
-        const radiusSqr = this.radius * this.radius;
-        for (const enemyNode of enemyRoot.children) {
-            const enemy = enemyNode.getComponent(Enemy);
-            if (!enemy || enemy.isDead) {
+        const damageDisabled = isSkillDamageDisabledForTesting(TrashBagFieldSkill.CONFIG.id);
+        const affectedEnemies = new Set<Enemy>();
+        for (const field of this.activeFields) {
+            const radiusSqr = field.radius * field.radius;
+            for (const enemyNode of enemyRoot.children) {
+                const enemy = enemyNode.getComponent(Enemy);
+                if (!enemy || enemy.isDead || affectedEnemies.has(enemy)) {
+                    continue;
+                }
+
+                const enemyPos = enemyNode.worldPosition;
+                const dx = enemyPos.x - field.center.x;
+                const dy = enemyPos.y - field.center.y;
+                if (dx * dx + dy * dy > radiusSqr) {
+                    continue;
+                }
+
+                if (!damageDisabled) {
+                    enemy.takeDamage(this.damagePerTick, this.fieldOwnerNode);
+                }
+                const bossSlow = this.imprisonEnabled
+                    ? Math.max(0.68, this.slowMultiplier + 0.22)
+                    : Math.max(0.75, this.slowMultiplier + 0.18);
+                enemy.applyMovementDebuff(
+                    this.slowDuration,
+                    enemy.isBoss ? bossSlow : this.slowMultiplier
+                );
+                affectedEnemies.add(enemy);
+            }
+        }
+    }
+
+    private applyFieldContainment(): void {
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            return;
+        }
+
+        for (const field of this.activeFields) {
+            const containRadius = field.radius;
+            const clampRadius = containRadius * this.imprisonClampRadiusFactor;
+            const containRadiusSq = containRadius * containRadius;
+            const clampRadiusSq = clampRadius * clampRadius;
+            const edgeBandStartSq = clampRadiusSq;
+
+            for (const enemyNode of enemyRoot.children) {
+                const enemy = enemyNode.getComponent(Enemy);
+                if (!enemy || enemy.isDead || enemy.isDyingState || enemy.isBoss) {
+                    continue;
+                }
+
+                const enemyPos = enemyNode.worldPosition;
+                this.tempEnemyOffset.set(
+                    enemyPos.x - field.center.x,
+                    enemyPos.y - field.center.y,
+                    0
+                );
+                const distanceSq = this.tempEnemyOffset.lengthSqr();
+                if (distanceSq > containRadiusSq) {
+                    continue;
+                }
+
+                const distance = Math.sqrt(Math.max(0.0001, distanceSq));
+                if (distance > clampRadius) {
+                    const clampScale = clampRadius / distance;
+                    enemyNode.setWorldPosition(
+                        field.center.x + this.tempEnemyOffset.x * clampScale,
+                        field.center.y + this.tempEnemyOffset.y * clampScale,
+                        enemyPos.z
+                    );
+                }
+
+                if (distanceSq >= edgeBandStartSq) {
+                    this.tempInwardDirection.set(-this.tempEnemyOffset.x, -this.tempEnemyOffset.y, 0);
+                    if (this.tempInwardDirection.lengthSqr() <= 0.0001) {
+                        this.tempInwardDirection.set(1, 0, 0);
+                    } else {
+                        this.tempInwardDirection.normalize();
+                    }
+
+                    const edgeRatio = Math.max(0, (distance - clampRadius) / Math.max(1, containRadius - clampRadius));
+                    const pushStrength = this.imprisonEdgePushStrength * (0.55 + edgeRatio * 0.75);
+                    enemy.applyKnockback(this.tempInwardDirection, pushStrength, 0.1);
+                    enemy.applyMovementDebuff(0.14, 0.22);
+                }
+            }
+        }
+    }
+
+    private syncFieldVisual(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        const lifeRatio = Math.max(0, 1 - this.fieldElapsed / Math.max(0.001, this.duration));
+        const pulse = 1 + Math.sin(this.fieldElapsed * 5.5) * 0.035 * lifeRatio;
+        for (const field of this.activeFields) {
+            if (!field.visual) {
                 continue;
             }
 
-            const enemyPos = enemyNode.worldPosition;
-            const dx = enemyPos.x - this.fieldCenter.x;
-            const dy = enemyPos.y - this.fieldCenter.y;
-            if (dx * dx + dy * dy <= radiusSqr) {
-                enemy.takeDamage(this.damagePerTick, this.fieldOwnerNode);
-                enemy.applyMovementDebuff(
-                    this.slowDuration,
-                    enemy.isBoss ? Math.max(0.75, this.slowMultiplier + 0.18) : this.slowMultiplier
+            this.tempFieldScale.set(
+                field.visualBaseScale * pulse,
+                field.visualBaseScale * pulse,
+                1
+            );
+            field.visual.setScale(this.tempFieldScale);
+        }
+    }
+
+    private tintFieldVisual(node: Node, useLandfillTint: boolean): void {
+        const sprites = node.getComponentsInChildren(Sprite);
+        for (const sprite of sprites) {
+            if (useLandfillTint) {
+                sprite.color = new Color(
+                    TrashBagFieldSkill.LANDFILL_FIELD_TINT.r,
+                    TrashBagFieldSkill.LANDFILL_FIELD_TINT.g,
+                    TrashBagFieldSkill.LANDFILL_FIELD_TINT.b,
+                    sprite.color.a
                 );
+            } else {
+                sprite.color = new Color(255, 255, 255, sprite.color.a);
             }
         }
     }
@@ -1176,7 +1739,7 @@ export class TrashBagFieldSkill extends ActiveSkill {
     private getTrashBagVisualBaseRadius(node: Node): number {
         const transform = node.getComponent(UITransform);
         if (!transform) {
-            return this.visualBaseRadiusFallback;
+            return TrashBagFieldSkill.VISUAL_BASE_RADIUS_FALLBACK;
         }
 
         return Math.max(
@@ -1191,21 +1754,28 @@ export class TrashBagFieldSkill extends ActiveSkill {
         this.tickElapsed = 0;
         this.fieldOwnerNode = null;
 
-        if (this.activeFieldVisual) {
-            Skill.put(this.activeFieldVisual);
-            this.activeFieldVisual = null;
+        for (const field of this.activeFields) {
+            if (field.visual) {
+                Skill.put(field.visual);
+            }
         }
+        this.activeFields.length = 0;
     }
 }
 
 export class VacuumVortexSkill extends ActiveSkill {
     private static readonly THROW_CLIP_NAME = 'throw';
     private static readonly RELEASE_CLIP_NAME = 'yaliguan_shifang';
+    private static readonly VORTEX_FIELD_DURATION = 2.35;
+    private static readonly VORTEX_FIELD_TICK_INTERVAL = 0.38;
+    /** 终阶双罐落点横向总间距（两罐各偏中心一半） */
+    private static readonly CANISTER_PAIR_SPREAD = 118;
+    private static readonly VORTEX_FIELD_COLOR = new Color(108, 214, 255, 200);
 
     static CONFIG: SkillConfig = {
         id: 'vacuum_vortex',
         name: '压力罐冲击',
-        description: '周期性抛出压力罐，延时爆炸并震开敌人，满级后可追加眩晕。',
+        description: '周期性抛出压力罐，延时爆炸并震开敌人，满级后进化为连环真空涡。',
         icon: 'skill_vacuum',
         ...commonActiveSkillConfig,
     } as SkillConfig;
@@ -1217,15 +1787,24 @@ export class VacuumVortexSkill extends ActiveSkill {
     private impactDamage = 42;
     private knockbackStrength = 240;
     private stunDuration = 0;
+    private canistersPerCast = 1;
+    private vacuumFieldDuration = 0;
+    private vacuumFieldRadiusFactor = 0;
+    private vacuumFieldTickDamage = 0;
+    private vacuumFieldPullStrength = 0;
+    private ownerNode: Node | null = null;
     private readonly activeCanisters: PressureCanisterState[] = [];
+    private readonly activeVortexFields: VacuumVortexFieldState[] = [];
     private readonly canisterBaseScale = new Vec3(1, 1, 1);
     private readonly shockwaveStartScale = new Vec3(0.18, 0.18, 1);
     private readonly shockwaveTargetScale = new Vec3(1, 1, 1);
     private readonly tempDirection = new Vec3(1, 0, 0);
     private readonly tempLandingPosition = new Vec3();
+    private readonly tempSecondaryLanding = new Vec3();
     private readonly tempLocalPosition = new Vec3();
     private readonly tempScale = new Vec3(1, 1, 1);
     private readonly tempEnemyDelta = new Vec3();
+    private readonly tempPullDirection = new Vec3();
     private readonly fallbackThrowDirection = new Vec3(1, 0, 0);
 
     constructor(level: number = 1) {
@@ -1240,7 +1819,30 @@ export class VacuumVortexSkill extends ActiveSkill {
         this.blastRadius = 88 + this.level * 10;
         this.impactDamage = 24 + this.level * 14;
         this.knockbackStrength = 170 + this.level * 42;
-        this.stunDuration = this.isTransformed ? 1.2 : 0;
+        this.stunDuration = 0;
+        this.canistersPerCast = 1;
+        this.vacuumFieldDuration = 0;
+        this.vacuumFieldRadiusFactor = 0;
+        this.vacuumFieldTickDamage = 0;
+        this.vacuumFieldPullStrength = 0;
+        this.applyTransformBonuses();
+    }
+
+    private applyTransformBonuses(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        this.cooldown = Math.max(1.85, this.cooldown * 0.82);
+        this.blastRadius = Math.round(this.blastRadius * 1.22);
+        this.impactDamage = Math.round(this.impactDamage * 1.16);
+        this.knockbackStrength = Math.round(this.knockbackStrength * 1.24);
+        this.stunDuration = 1.2;
+        this.canistersPerCast = 2;
+        this.vacuumFieldDuration = VacuumVortexSkill.VORTEX_FIELD_DURATION;
+        this.vacuumFieldRadiusFactor = 0.88;
+        this.vacuumFieldTickDamage = Math.max(6, Math.round(this.impactDamage * 0.22));
+        this.vacuumFieldPullStrength = 148;
     }
 
     public levelUp(): void {
@@ -1249,14 +1851,18 @@ export class VacuumVortexSkill extends ActiveSkill {
     }
 
     public getDescription(): string {
-        const stunText = this.stunDuration > 0
-            ? `爆炸后额外眩晕 ${this.stunDuration.toFixed(1)}s。`
-            : '满级后会追加地面眩晕。';
-        return `每 ${this.cooldown.toFixed(1)}s 抛出一个压力罐，${this.fuseTime.toFixed(1)}s 后爆炸，造成 ${this.impactDamage} 伤害并击退半径 ${Math.round(this.blastRadius)} 内敌人。${stunText}`;
+        const transformedText = this.isTransformed
+            ? '终阶「连环真空涡」：每次连投双罐，爆炸后留下真空涡吸附敌人并持续撕扯。'
+            : '满级后进化为连环真空涡，追加眩晕与真空残留区。';
+        const overloadText = this.isTransformed
+            ? `真空涡持续 ${this.vacuumFieldDuration.toFixed(1)}s，每 ${VacuumVortexSkill.VORTEX_FIELD_TICK_INTERVAL.toFixed(2)}s 追加撕扯伤害，并刷新 ${this.stunDuration.toFixed(1)}s 眩晕。`
+            : '';
+        return `每 ${this.cooldown.toFixed(1)}s 抛出${this.canistersPerCast > 1 ? '两颗' : '一个'}压力罐，${this.fuseTime.toFixed(1)}s 后爆炸，造成 ${this.impactDamage} 伤害并击退半径 ${Math.round(this.blastRadius)} 内敌人。${overloadText}${transformedText}`;
     }
 
     public update(dt: number): void {
         super.update(dt);
+        this.updateVortexFields(dt);
 
         if (this.activeCanisters.length <= 0) {
             return;
@@ -1281,12 +1887,23 @@ export class VacuumVortexSkill extends ActiveSkill {
     }
 
     protected onUse(context: SkillContext): void {
+        this.ownerNode = context.ownerNode;
+        const primaryLanding = this.getLandingPosition(context);
+
+        for (let castIndex = 0; castIndex < this.canistersPerCast; castIndex++) {
+            const landingPosition = this.canistersPerCast > 1
+                ? this.getPairedLandingPosition(context, primaryLanding, castIndex)
+                : primaryLanding;
+            this.spawnPressureCanister(context, landingPosition);
+        }
+    }
+
+    private spawnPressureCanister(context: SkillContext, landingPosition: Vec3): void {
         const ownerPosition = context.ownerNode.worldPosition;
         const parent = BulletHell.inst?.bullets;
         const prefab = context.payload?.visual?.projectilePrefab ?? null;
         const impactPrefab = context.payload?.visual?.impactPrefab ?? null;
 
-        const landingPosition = this.getLandingPosition(context);
         const direction = new Vec3(
             landingPosition.x - ownerPosition.x,
             landingPosition.y - ownerPosition.y,
@@ -1304,7 +1921,7 @@ export class VacuumVortexSkill extends ActiveSkill {
                 visual.insert(parent);
                 visual.init();
                 visual.disableAutoRotation = true;
-                visual.trigger = false;
+                this.configureCanisterVisualCollision(visual);
                 visual.velocity.set(0, 0, 0);
                 visual.lifeTime = this.fuseTime + 0.8;
                 visual.damage = 0;
@@ -1336,6 +1953,30 @@ export class VacuumVortexSkill extends ActiveSkill {
 
         this.activeCanisters.push(canister);
         this.updateCanisterVisual(canister);
+    }
+
+    private getPairedLandingPosition(context: SkillContext, primaryLanding: Vec3, castIndex: number): Vec3 {
+        const origin = context.ownerNode.worldPosition;
+        this.tempDirection.set(
+            primaryLanding.x - origin.x,
+            primaryLanding.y - origin.y,
+            0
+        );
+        if (this.tempDirection.lengthSqr() <= 0.0001) {
+            this.tempDirection.set(this.getFallbackThrowDirection());
+        }
+        this.tempDirection.normalize();
+
+        const spreadSign = castIndex % 2 === 0 ? -1 : 1;
+        const halfSpread = VacuumVortexSkill.CANISTER_PAIR_SPREAD * 0.5;
+        const perpX = -this.tempDirection.y * spreadSign;
+        const perpY = this.tempDirection.x * spreadSign;
+        this.tempSecondaryLanding.set(
+            primaryLanding.x + perpX * halfSpread,
+            primaryLanding.y + perpY * halfSpread,
+            primaryLanding.z
+        );
+        return this.tempSecondaryLanding;
     }
 
     private getLandingPosition(context: SkillContext): Vec3 {
@@ -1452,6 +2093,7 @@ export class VacuumVortexSkill extends ActiveSkill {
         canister.isExploding = true;
         canister.explosionElapsed = 0;
         this.spawnImpactShockwave(canister);
+        const damageDisabled = isSkillDamageDisabledForTesting(VacuumVortexSkill.CONFIG.id);
         const enemies = this.collectEnemiesInRadius(canister.landingPosition, canister.blastRadius);
         for (const enemy of enemies) {
             const enemyPosition = enemy.node.worldPosition;
@@ -1469,8 +2111,10 @@ export class VacuumVortexSkill extends ActiveSkill {
             }
 
             const distanceRatio = Math.max(0.25, 1 - distance / Math.max(1, canister.blastRadius));
-            const damage = Math.round(canister.damage * (0.7 + distanceRatio * 0.6));
-            enemy.takeDamage(damage);
+            if (!damageDisabled) {
+                const damage = Math.round(canister.damage * (0.7 + distanceRatio * 0.6));
+                enemy.takeDamage(damage, this.ownerNode ?? undefined);
+            }
             enemy.applyKnockback(
                 this.tempEnemyDelta,
                 canister.knockbackStrength * (enemy.isBoss ? 0.45 : 1),
@@ -1480,6 +2124,10 @@ export class VacuumVortexSkill extends ActiveSkill {
             if (canister.stunDuration > 0 && !enemy.isBoss) {
                 enemy.applyStun(canister.stunDuration);
             }
+        }
+
+        if (this.isTransformed && this.vacuumFieldDuration > 0) {
+            this.spawnVortexField(canister);
         }
 
         if (canister.visual) {
@@ -1511,7 +2159,7 @@ export class VacuumVortexSkill extends ActiveSkill {
         shockwave.insert(parent);
         shockwave.init();
         shockwave.disableAutoRotation = true;
-        shockwave.trigger = false;
+        this.configureCanisterVisualCollision(shockwave);
         shockwave.velocity.set(0, 0, 0);
         shockwave.damage = 0;
         shockwave.penetration = 9999;
@@ -1546,6 +2194,18 @@ export class VacuumVortexSkill extends ActiveSkill {
         return Math.max(1, Math.max(transform.contentSize.width, transform.contentSize.height) * 0.5);
     }
 
+    /** 压力罐由技能逻辑控制生命周期，不与敌人发生子弹碰撞回收。 */
+    private configureCanisterVisualCollision(visual: Skill): void {
+        if (!visual.body) {
+            return;
+        }
+
+        visual.trigger = false;
+        visual.group = PhysicsSystem.PhysicsGroup.DEFAULT;
+        visual.body.group = PhysicsSystem.PhysicsGroup.DEFAULT;
+        visual.body.mask = 0;
+    }
+
     private playPressureCanisterAnimation(node: Node, preferredClipName: string): number {
         const animations = node.getComponentsInChildren(Animation);
         if (!animations || animations.length <= 0) {
@@ -1576,6 +2236,164 @@ export class VacuumVortexSkill extends ActiveSkill {
         return maxDuration;
     }
 
+    private updateVortexFields(dt: number): void {
+        if (!this.isTransformed) {
+            if (this.activeVortexFields.length > 0) {
+                this.clearVortexFields();
+            }
+            return;
+        }
+
+        if (this.activeVortexFields.length <= 0) {
+            return;
+        }
+
+        for (let index = this.activeVortexFields.length - 1; index >= 0; index--) {
+            const field = this.activeVortexFields[index];
+            field.elapsed += dt;
+            field.tickElapsed += dt;
+            this.syncVortexFieldVisual(field);
+            this.applyVortexFieldPull(field);
+
+            while (field.tickElapsed >= VacuumVortexSkill.VORTEX_FIELD_TICK_INTERVAL) {
+                field.tickElapsed -= VacuumVortexSkill.VORTEX_FIELD_TICK_INTERVAL;
+                this.tickVortexField(field);
+            }
+
+            if (field.elapsed >= field.duration) {
+                if (field.visual) {
+                    Skill.put(field.visual);
+                }
+                this.activeVortexFields.splice(index, 1);
+            }
+        }
+    }
+
+    private spawnVortexField(canister: PressureCanisterState): void {
+        const parent = BulletHell.inst?.bullets;
+        if (!parent) {
+            return;
+        }
+
+        const fieldRadius = Math.max(48, canister.blastRadius * this.vacuumFieldRadiusFactor);
+        let visual: Skill | null = null;
+        const impactPrefab = canister.impactPrefab;
+        if (impactPrefab) {
+            visual = Skill.get(impactPrefab);
+            if (visual) {
+                visual.insert(parent);
+                visual.init();
+                visual.disableAutoRotation = true;
+                this.configureCanisterVisualCollision(visual);
+                visual.velocity.set(0, 0, 0);
+                visual.damage = 0;
+                visual.penetration = 9999;
+                visual.knockback = 0;
+                visual.lifeTime = this.vacuumFieldDuration + 0.2;
+                Vec3.subtract(this.tempLocalPosition, canister.landingPosition, parent.worldPosition);
+                visual.setPosition(this.tempLocalPosition);
+
+                const baseRadius = this.getImpactVisualBaseRadius(visual.node);
+                const targetScale = Math.max(0.12, fieldRadius / Math.max(1, baseRadius));
+                this.tempScale.set(targetScale * 0.42, targetScale * 0.42, 1);
+                visual.setScale(this.tempScale);
+                this.tintVortexFieldVisual(visual.node, 0.58);
+            }
+        }
+
+        const visualBaseScale = visual
+            ? new Vec3(this.tempScale.x, this.tempScale.y, this.tempScale.z)
+            : new Vec3(1, 1, 1);
+
+        this.activeVortexFields.push({
+            worldPosition: new Vec3(canister.landingPosition.x, canister.landingPosition.y, canister.landingPosition.z),
+            visual,
+            visualBaseScale,
+            elapsed: 0,
+            duration: this.vacuumFieldDuration,
+            radius: fieldRadius,
+            pullStrength: this.vacuumFieldPullStrength,
+            tickDamage: this.vacuumFieldTickDamage,
+            tickElapsed: 0,
+            stunPulse: this.stunDuration > 0 ? Math.min(0.45, this.stunDuration) : 0,
+        });
+    }
+
+    private syncVortexFieldVisual(field: VacuumVortexFieldState): void {
+        if (!field.visual || !BulletHell.inst?.bullets) {
+            return;
+        }
+
+        const parent = BulletHell.inst.bullets;
+        Vec3.subtract(this.tempLocalPosition, field.worldPosition, parent.worldPosition);
+        field.visual.setPosition(this.tempLocalPosition);
+
+        const lifeRatio = Math.max(0, 1 - field.elapsed / Math.max(0.001, field.duration));
+        const pulse = 1 + Math.sin(field.elapsed * 14) * 0.08 * lifeRatio;
+        this.tempScale.set(
+            field.visualBaseScale.x * pulse,
+            field.visualBaseScale.y * pulse,
+            field.visualBaseScale.z
+        );
+        field.visual.setScale(this.tempScale);
+        field.visual.node.setRotationFromEuler(0, 0, field.elapsed * 72);
+        this.tintVortexFieldVisual(field.visual.node, 0.34 + lifeRatio * 0.42);
+    }
+
+    private applyVortexFieldPull(field: VacuumVortexFieldState): void {
+        const enemies = this.collectEnemiesInRadius(field.worldPosition, field.radius);
+        for (const enemy of enemies) {
+            const enemyPosition = enemy.node.worldPosition;
+            this.tempPullDirection.set(
+                field.worldPosition.x - enemyPosition.x,
+                field.worldPosition.y - enemyPosition.y,
+                0
+            );
+            const distance = this.tempPullDirection.length();
+            if (distance <= 0.001) {
+                continue;
+            }
+
+            this.tempPullDirection.multiplyScalar(1 / distance);
+            const edgeFactor = Math.max(0.35, 1 - distance / Math.max(1, field.radius));
+            const pullStrength = field.pullStrength * edgeFactor * (enemy.isBoss ? 0.38 : 1);
+            enemy.applyMovementDebuff(0.12, enemy.isBoss ? 0.58 : 0.46);
+            enemy.applyKnockback(this.tempPullDirection, pullStrength, 0.12);
+        }
+    }
+
+    private tickVortexField(field: VacuumVortexFieldState): void {
+        const enemies = this.collectEnemiesInRadius(field.worldPosition, field.radius);
+        const damageDisabled = isSkillDamageDisabledForTesting(VacuumVortexSkill.CONFIG.id);
+
+        for (const enemy of enemies) {
+            if (!damageDisabled) {
+                enemy.takeDamage(field.tickDamage, this.ownerNode ?? undefined);
+            }
+            if (field.stunPulse > 0 && !enemy.isBoss) {
+                enemy.applyStun(field.stunPulse);
+            }
+        }
+    }
+
+    private clearVortexFields(): void {
+        for (const field of this.activeVortexFields) {
+            if (field.visual) {
+                Skill.put(field.visual);
+            }
+        }
+        this.activeVortexFields.length = 0;
+    }
+
+    private tintVortexFieldVisual(node: Node, alphaScale: number): void {
+        const sprites = node.getComponentsInChildren(Sprite);
+        const color = VacuumVortexSkill.VORTEX_FIELD_COLOR;
+        const alpha = Math.max(0, Math.min(255, Math.round(color.a * alphaScale)));
+        for (const sprite of sprites) {
+            sprite.color = new Color(color.r, color.g, color.b, alpha);
+        }
+    }
+
     private collectEnemiesInRadius(center: Vec3, radius: number): Enemy[] {
         const enemies: Enemy[] = [];
         const enemyRoot = BulletHell.inst?.objects;
@@ -1604,6 +2422,9 @@ export class VacuumVortexSkill extends ActiveSkill {
 export class BubbleShieldSkill extends ActiveSkill {
     private static readonly EXPAND_CLIP_NAME = 'bubble_attack';
     private static readonly DISAPPEAR_CLIP_NAME = 'bubble_disappear';
+    /** 终阶穹顶内玩家受伤倍率（0.7 = 30% 减伤） */
+    private static readonly DOME_DAMAGE_TAKEN_MULTIPLIER = 0.7;
+    private static readonly DOME_FADE_FLASH_DURATION = 0.08;
 
     static CONFIG: SkillConfig = {
         id: 'bubble_shield',
@@ -1663,6 +2484,17 @@ export class BubbleShieldSkill extends ActiveSkill {
         this.knockbackStrength = 320 + this.level * 42;
         this.knockbackDuration = 0.22;
         this.cooldown = Math.max(2.7, 5.2 - (this.level - 1) * 0.22);
+        this.applyTransformBonuses();
+    }
+
+    private applyTransformBonuses(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        this.holdDamage *= 2;
+        this.knockbackStrength *= 1.5;
+        this.sustainDuration += 0.35;
     }
 
     public levelUp(): void {
@@ -1672,9 +2504,22 @@ export class BubbleShieldSkill extends ActiveSkill {
 
     public getDescription(): string {
         const transformedText = this.isTransformed
-            ? '终阶形态预留中，当前先保留普通泡沫盾逻辑。'
+            ? '终阶「硬化泡沫穹顶」：停留阶段泡沫变实心，玩家获得 30% 减伤；外圈伤害翻倍，扩张击退更强。'
             : '终阶形态暂未接入，当前以扩张推开与外圈伤害为主。';
-        return `每 ${this.cooldown.toFixed(1)}s 以玩家为中心展开泡沫盾，半径扩大到 ${Math.round(this.maxRadius)} 后停留 ${this.sustainDuration.toFixed(1)}s。扩张阶段会击退外缘敌人并造成少量伤害，停留阶段只对外圈目标造成 ${Math.max(1, Math.round(this.holdDamage))} 点伤害，不会阻挡穿行。${transformedText}`;
+        const holdDamageText = Math.max(1, Math.round(this.holdDamage));
+        const sustainText = this.isTransformed
+            ? `停留 ${this.sustainDuration.toFixed(1)}s 期间穹顶内减伤 30%，外圈每跳 ${holdDamageText} 伤害`
+            : `停留 ${this.sustainDuration.toFixed(1)}s 期间只对外圈造成 ${holdDamageText} 点伤害，不阻挡穿行`;
+        return `每 ${this.cooldown.toFixed(1)}s 以玩家为中心展开泡沫盾，半径扩大到 ${Math.round(this.maxRadius)}。扩张阶段击退外缘敌人并造成少量伤害；${sustainText}。${transformedText}`;
+    }
+
+    private isInSustainPhase(): boolean {
+        return this.shieldElapsed >= this.expandDuration
+            && this.shieldElapsed < this.expandDuration + this.sustainDuration;
+    }
+
+    private isHardenedDomeActive(): boolean {
+        return this.isTransformed && this.isInSustainPhase();
     }
 
     public update(dt: number): void {
@@ -1693,6 +2538,7 @@ export class BubbleShieldSkill extends ActiveSkill {
         this.damageTickElapsed += dt;
         this.previousRadius = this.currentRadius;
         this.shieldCenter.set(this.activeOwnerNode.worldPosition);
+        this.syncDomeProtection();
 
         const totalDuration = this.expandDuration + this.sustainDuration + this.fadeDuration;
         if (this.shieldElapsed >= totalDuration) {
@@ -1715,7 +2561,8 @@ export class BubbleShieldSkill extends ActiveSkill {
                 this.damageTickElapsed -= this.damageTickInterval;
                 this.applyOuterRingDamage();
             }
-            this.updateShieldVisual(0.96 + Math.sin(this.shieldElapsed * 8) * 0.04);
+            const sustainPulse = 0.96 + Math.sin(this.shieldElapsed * 8) * 0.04;
+            this.updateShieldVisual(this.isHardenedDomeActive() ? 1 : sustainPulse);
             return;
         }
 
@@ -1725,6 +2572,11 @@ export class BubbleShieldSkill extends ActiveSkill {
         }
 
         const fadeElapsed = this.shieldElapsed - this.expandDuration - this.sustainDuration;
+        if (this.isTransformed && fadeElapsed < BubbleShieldSkill.DOME_FADE_FLASH_DURATION) {
+            this.updateShieldVisual(1);
+            return;
+        }
+
         const fadeProgress = Math.min(1, fadeElapsed / Math.max(0.001, this.fadeDuration));
         this.currentRadius = Math.max(4, this.maxRadius * (1 - fadeProgress * 0.88));
         const alpha = Math.max(0, 1 - fadeElapsed / Math.max(0.001, this.fadeDuration));
@@ -1831,12 +2683,15 @@ export class BubbleShieldSkill extends ActiveSkill {
 
         const outerRadius = Math.max(4, this.currentRadius);
         const lineWidth = Math.max(8, this.edgeThickness * 0.72);
-        const fillAlpha = Math.max(0, Math.min(255, Math.round(28 * alphaScale)));
-        const strokeAlpha = Math.max(0, Math.min(255, Math.round(206 * alphaScale)));
-        const innerStrokeAlpha = Math.max(0, Math.min(255, Math.round(118 * alphaScale)));
+        const hardened = this.isHardenedDomeActive();
+        const fillAlpha = Math.max(0, Math.min(255, Math.round((hardened ? 118 : 28) * alphaScale)));
+        const strokeAlpha = Math.max(0, Math.min(255, Math.round((hardened ? 236 : 206) * alphaScale)));
+        const innerStrokeAlpha = Math.max(0, Math.min(255, Math.round((hardened ? 188 : 118) * alphaScale)));
 
         this.shieldGraphics.clear();
-        this.shieldGraphics.fillColor = new Color(182, 242, 255, fillAlpha);
+        this.shieldGraphics.fillColor = hardened
+            ? new Color(248, 248, 255, fillAlpha)
+            : new Color(182, 242, 255, fillAlpha);
         this.shieldGraphics.circle(0, 0, Math.max(4, outerRadius - lineWidth * 0.35));
         this.shieldGraphics.fill();
         this.shieldGraphics.lineWidth = lineWidth;
@@ -1872,11 +2727,54 @@ export class BubbleShieldSkill extends ActiveSkill {
             return;
         }
 
-        const normalizedAlpha = Math.max(0.98, Math.min(1, alphaScale));
+        const normalizedAlpha = Math.max(0, Math.min(1, alphaScale));
+        const hardened = this.isHardenedDomeActive();
         for (const sprite of this.shieldSprites) {
+            if (hardened) {
+                sprite.color = new Color(
+                    248,
+                    248,
+                    255,
+                    Math.max(0, Math.min(255, Math.round(235 * normalizedAlpha)))
+                );
+                continue;
+            }
+
             const color = sprite.color;
-            sprite.color = new Color(color.r, color.g, color.b, Math.max(0, Math.min(255, Math.round(255 * normalizedAlpha))));
+            sprite.color = new Color(
+                color.r,
+                color.g,
+                color.b,
+                Math.max(0, Math.min(255, Math.round(255 * Math.max(0.98, normalizedAlpha))))
+            );
         }
+    }
+
+    private syncDomeProtection(): void {
+        const player = this.resolveProtectedPlayer();
+        if (!player) {
+            return;
+        }
+
+        if (this.isHardenedDomeActive()) {
+            player.setIncomingDamageMultiplier(BubbleShieldSkill.DOME_DAMAGE_TAKEN_MULTIPLIER);
+            return;
+        }
+
+        player.setIncomingDamageMultiplier(1);
+    }
+
+    private clearDomeProtection(): void {
+        const player = this.resolveProtectedPlayer() ?? Player.inst;
+        player?.setIncomingDamageMultiplier(1);
+    }
+
+    private resolveProtectedPlayer(): Player | null {
+        if (this.activeOwnerNode) {
+            return this.activeOwnerNode.getComponent(Player);
+        }
+
+        return Player.inst;
     }
 
     private getShieldVisualBaseRadius(node: Node): number {
@@ -2015,6 +2913,7 @@ export class BubbleShieldSkill extends ActiveSkill {
     }
 
     private clearShield(): void {
+        this.clearDomeProtection();
         this.isShieldActive = false;
         this.activeOwnerNode = null;
         this.shieldVisualParent = null;
@@ -2223,6 +3122,15 @@ const commonSummonSkillConfig: Partial<SkillConfig> = {
 };
 
 export class StaticEmitterSkill extends SummonSkill {
+    private static readonly GROUND_PATCH_DURATION = 3.2;
+    private static readonly GROUND_PATCH_RADIUS = 56;
+    private static readonly GROUND_PATCH_TICK_INTERVAL = 0.38;
+    private static readonly GROUND_PATCH_CHAIN_RANGE = 92;
+    private static readonly GROUND_PATCH_TICK_DAMAGE_FACTOR = 0.34;
+    private static readonly SECONDARY_CHAIN_DAMAGE_FACTOR = 0.55;
+    private static readonly OVERLOAD_LIGHTNING_COLOR = new Color(228, 210, 255, 255);
+    private static readonly OVERLOAD_PATCH_COLOR = new Color(186, 168, 255, 210);
+
     static CONFIG: SkillConfig = {
         id: 'static_emitter',
         name: '静电发射器',
@@ -2254,6 +3162,8 @@ export class StaticEmitterSkill extends SummonSkill {
     private readonly tempStrikePosition = new Vec3();
     private readonly lightningScale = new Vec3(1, 1, 1);
     private readonly activeStrikes: StaticArcStrikeState[] = [];
+    private readonly groundPatches: StaticGroundPatchState[] = [];
+    private readonly tempPatchScale = new Vec3(1, 1, 1);
 
     constructor(level: number = 1) {
         super(StaticEmitterSkill.CONFIG, level);
@@ -2269,6 +3179,18 @@ export class StaticEmitterSkill extends SummonSkill {
         this.chainTargetCount = Math.min(4, 1 + Math.floor(this.level / 3));
         this.damagePerHit = 14 + this.level * 8;
         this.chainDelayStep = Math.max(0.04, 0.09 - (this.level - 1) * 0.004);
+        this.applyTransformBonuses();
+    }
+
+    private applyTransformBonuses(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        this.attackInterval = Math.max(0.62, this.attackInterval * 0.88);
+        this.boltCount = Math.min(7, this.boltCount + 1);
+        this.chainTargetCount = Math.min(5, this.chainTargetCount + 1);
+        this.chainRange += 24;
     }
 
     public levelUp(): void {
@@ -2278,14 +3200,18 @@ export class StaticEmitterSkill extends SummonSkill {
 
     public getDescription(): string {
         const transformedText = this.isTransformed
-            ? '完全体形态预留中，当前先保留多段静电链与多发射流逻辑。'
+            ? '终阶「避雷针网格」：命中后留下电浆地贴，地贴内敌人会持续受击并彼此二次导电。'
             : '等级越高，单轮发射数量越多，且每条静电可继续跳向更多敌人。';
-        return `发射器停在玩家右上方，每 ${this.attackInterval.toFixed(1)}s 锁定范围 ${Math.round(this.attackRange)} 内最近敌人，单轮释放 ${this.boltCount} 条静电。每条静电最多命中 ${this.chainTargetCount} 个目标，命中后再沿附近敌人继续跳转。${transformedText}`;
+        const overloadText = this.isTransformed
+            ? `电浆地贴持续 ${StaticEmitterSkill.GROUND_PATCH_DURATION.toFixed(1)}s，范围内敌人会自动二次跳转。`
+            : '';
+        return `发射器停在玩家右上方，每 ${this.attackInterval.toFixed(1)}s 锁定范围 ${Math.round(this.attackRange)} 内最近敌人，单轮释放 ${this.boltCount} 条静电。每条静电最多命中 ${this.chainTargetCount} 个目标，命中后再沿附近敌人继续跳转。${overloadText}${transformedText}`;
     }
 
     public update(dt: number): void {
         if (!this.isSummoned || !this.ownerNode || !this.summonParent) {
             this.updateActiveStrikes(dt);
+            this.updateGroundPatches(dt);
             return;
         }
 
@@ -2295,6 +3221,7 @@ export class StaticEmitterSkill extends SummonSkill {
         this.updateEmitterAnchor();
         this.syncEmitterVisual();
         this.updateActiveStrikes(dt);
+        this.updateGroundPatches(dt);
 
         if (this.summonElapsed >= this.summonDuration) {
             this.clearEmitter();
@@ -2425,7 +3352,9 @@ export class StaticEmitterSkill extends SummonSkill {
         sourceWorldPosition: Vec3,
         targetWorldPosition: Vec3,
         targetEnemy: Enemy,
-        delay: number
+        delay: number,
+        damageOverride?: number,
+        isSecondary = false
     ): void {
         let visual: Skill | null = null;
         let duration = 0.18;
@@ -2452,9 +3381,10 @@ export class StaticEmitterSkill extends SummonSkill {
             elapsed: 0,
             delay,
             duration,
-            damage: this.damagePerHit,
+            damage: damageOverride ?? this.damagePerHit,
             hasStarted: false,
             hasAppliedDamage: false,
+            isSecondary,
         });
     }
 
@@ -2480,6 +3410,9 @@ export class StaticEmitterSkill extends SummonSkill {
                 strike.hasAppliedDamage = true;
                 if (!isSkillDamageDisabledForTesting(StaticEmitterSkill.CONFIG.id) && strike.targetEnemy && !strike.targetEnemy.isDead && !strike.targetEnemy.isDyingState) {
                     strike.targetEnemy.takeDamage(Math.max(1, Math.round(strike.damage)), this.ownerNode ?? undefined);
+                    if (this.isTransformed && !strike.isSecondary) {
+                        this.spawnGroundPatch(strike.targetWorldPosition, this.getImpactPrefab());
+                    }
                 }
             }
 
@@ -2488,6 +3421,153 @@ export class StaticEmitterSkill extends SummonSkill {
             }
             this.activeStrikes.splice(index, 1);
         }
+    }
+
+    private spawnGroundPatch(worldPosition: Vec3, prefab: import('cc').Prefab | null): void {
+        let visual: Skill | null = null;
+        if (prefab && this.summonParent) {
+            visual = Skill.get(prefab);
+            if (visual) {
+                visual.insert(this.summonParent);
+                visual.init();
+                visual.disableAutoRotation = true;
+                visual.velocity.set(0, 0, 0);
+                visual.lifeTime = 999999;
+                visual.node.active = true;
+                this.configureSummonVisualCollision(visual);
+                this.tintOverloadVisual(visual.node, StaticEmitterSkill.OVERLOAD_PATCH_COLOR, 0.52);
+                this.playVisualAnimation(visual.node);
+            }
+        }
+
+        this.groundPatches.push({
+            worldPosition: new Vec3(worldPosition.x, worldPosition.y, worldPosition.z),
+            visual,
+            elapsed: 0,
+            duration: StaticEmitterSkill.GROUND_PATCH_DURATION,
+            radius: StaticEmitterSkill.GROUND_PATCH_RADIUS,
+            damageTickElapsed: StaticEmitterSkill.GROUND_PATCH_TICK_INTERVAL * 0.5,
+        });
+    }
+
+    private updateGroundPatches(dt: number): void {
+        if (!this.isTransformed) {
+            if (this.groundPatches.length > 0) {
+                this.clearGroundPatches();
+            }
+            return;
+        }
+
+        if (this.groundPatches.length <= 0) {
+            return;
+        }
+
+        for (let index = this.groundPatches.length - 1; index >= 0; index--) {
+            const patch = this.groundPatches[index];
+            patch.elapsed += dt;
+            patch.damageTickElapsed += dt;
+            this.syncGroundPatchVisual(patch);
+
+            if (patch.elapsed >= patch.duration) {
+                if (patch.visual) {
+                    Skill.put(patch.visual);
+                }
+                this.groundPatches.splice(index, 1);
+                continue;
+            }
+
+            while (patch.damageTickElapsed >= StaticEmitterSkill.GROUND_PATCH_TICK_INTERVAL) {
+                patch.damageTickElapsed -= StaticEmitterSkill.GROUND_PATCH_TICK_INTERVAL;
+                this.tickGroundPatch(patch);
+            }
+        }
+    }
+
+    private syncGroundPatchVisual(patch: StaticGroundPatchState): void {
+        if (!patch.visual || !this.summonParent) {
+            return;
+        }
+
+        Vec3.subtract(this.tempLocalPosition, patch.worldPosition, this.summonParent.worldPosition);
+        patch.visual.setPosition(this.tempLocalPosition);
+
+        const lifeRatio = Math.max(0, 1 - patch.elapsed / Math.max(0.001, patch.duration));
+        const scale = 0.34 + 0.2 * lifeRatio;
+        this.tempPatchScale.set(scale, scale, 1);
+        patch.visual.setScale(this.tempPatchScale);
+
+        const alpha = Math.round(StaticEmitterSkill.OVERLOAD_PATCH_COLOR.a * (0.45 + lifeRatio * 0.55));
+        this.tintOverloadVisual(patch.visual.node, StaticEmitterSkill.OVERLOAD_PATCH_COLOR, alpha / 255);
+    }
+
+    private tickGroundPatch(patch: StaticGroundPatchState): void {
+        if (isSkillDamageDisabledForTesting(StaticEmitterSkill.CONFIG.id) || !this.ownerNode) {
+            return;
+        }
+
+        const enemiesInPatch = this.collectEnemiesWithinRadius(patch.worldPosition, patch.radius);
+        if (enemiesInPatch.length <= 0) {
+            return;
+        }
+
+        const tickDamage = Math.max(1, Math.round(this.damagePerHit * StaticEmitterSkill.GROUND_PATCH_TICK_DAMAGE_FACTOR));
+        const chainedThisTick = new Set<Enemy>();
+
+        for (const enemy of enemiesInPatch) {
+            enemy.takeDamage(tickDamage, this.ownerNode);
+        }
+
+        if (enemiesInPatch.length < 2) {
+            return;
+        }
+
+        const impactPrefab = this.getImpactPrefab();
+        for (const sourceEnemy of enemiesInPatch) {
+            const chainTarget = this.findNearestEnemyWithinRange(
+                sourceEnemy.node.worldPosition,
+                StaticEmitterSkill.GROUND_PATCH_CHAIN_RANGE,
+                new Set([...chainedThisTick, sourceEnemy])
+            );
+            if (!chainTarget || enemiesInPatch.indexOf(chainTarget) < 0) {
+                continue;
+            }
+
+            chainedThisTick.add(chainTarget);
+            const secondaryDamage = Math.max(1, Math.round(this.damagePerHit * StaticEmitterSkill.SECONDARY_CHAIN_DAMAGE_FACTOR));
+            this.queueStaticStrike(
+                impactPrefab,
+                sourceEnemy.node.worldPosition,
+                chainTarget.node.worldPosition,
+                chainTarget,
+                0,
+                secondaryDamage,
+                true
+            );
+        }
+    }
+
+    private collectEnemiesWithinRadius(center: Vec3, radius: number): Enemy[] {
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot) {
+            return [];
+        }
+
+        const radiusSq = radius * radius;
+        const enemies: Enemy[] = [];
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead || enemy.isDyingState) {
+                continue;
+            }
+
+            const dx = enemyNode.worldPosition.x - center.x;
+            const dy = enemyNode.worldPosition.y - center.y;
+            if (dx * dx + dy * dy <= radiusSq) {
+                enemies.push(enemy);
+            }
+        }
+
+        return enemies;
     }
 
     private activateStrikeVisual(strike: StaticArcStrikeState): void {
@@ -2512,7 +3592,22 @@ export class StaticEmitterSkill extends SummonSkill {
         this.lightningScale.set(Math.max(0.12, distance / Math.max(1, baseLength)), 1, 1);
         strike.visual.setScale(this.lightningScale);
         strike.visual.node.active = true;
+        if (this.isTransformed || strike.isSecondary) {
+            this.tintOverloadVisual(
+                strike.visual.node,
+                StaticEmitterSkill.OVERLOAD_LIGHTNING_COLOR,
+                strike.isSecondary ? 0.82 : 1
+            );
+        }
         this.playVisualAnimation(strike.visual.node);
+    }
+
+    private tintOverloadVisual(node: Node, color: Color, alphaScale: number): void {
+        const sprites = node.getComponentsInChildren(Sprite);
+        const alpha = Math.max(0, Math.min(255, Math.round(color.a * alphaScale)));
+        for (const sprite of sprites) {
+            sprite.color = new Color(color.r, color.g, color.b, alpha);
+        }
     }
 
     private findNearestEnemyWithinRange(origin: Vec3, maxDistance: number, excluded?: Set<Enemy>): Enemy | null {
@@ -2609,6 +3704,7 @@ export class StaticEmitterSkill extends SummonSkill {
             }
         }
         this.activeStrikes.length = 0;
+        this.clearGroundPatches();
 
         this.ownerNode = null;
         this.summonParent = null;
@@ -2618,9 +3714,28 @@ export class StaticEmitterSkill extends SummonSkill {
         this.attackElapsed = 0;
         this.emitterWorldPosition.set(Vec3.ZERO);
     }
+
+    private clearGroundPatches(): void {
+        for (const patch of this.groundPatches) {
+            if (patch.visual) {
+                Skill.put(patch.visual);
+            }
+        }
+        this.groundPatches.length = 0;
+    }
 }
 
 export class PurificationTowerSkill extends SummonSkill {
+    /** beam 贴图默认朝右上约 45°，补偿后 beamAngle=0 时指向正右方 */
+    private static readonly BEAM_ART_OFFSET_DEG = 45;
+    /** Lv1 光束半径约占屏幕宽度 1/4，满级约 1/2 */
+    private static readonly BEAM_MIN_SCREEN_WIDTH_RATIO = 0.25;
+    private static readonly BEAM_MAX_SCREEN_WIDTH_RATIO = 0.5;
+    private static readonly BEAM_SCREEN_WIDTH_FALLBACK = 720;
+    private static readonly BEAM_NORMAL_ALPHA = 102;
+    private static readonly BEAM_OVERLOAD_PRIMARY_ALPHA = 220;
+    private static readonly BEAM_OVERLOAD_MIRROR_ALPHA = 200;
+
     static CONFIG: SkillConfig = {
         id: 'purification_tower',
         name: '净化塔',
@@ -2637,6 +3752,7 @@ export class PurificationTowerSkill extends SummonSkill {
     private beamRotationSpeed = Math.PI * 0.62;
     private damagePerTick = 14;
     private damageTickInterval = 0.22;
+    private immobilizeDuration = 0.2;
     private minSpawnDistance = 96;
     private maxSpawnDistance = 236;
     private readonly beamVisualBaseLengthFallback = 60;
@@ -2646,6 +3762,7 @@ export class PurificationTowerSkill extends SummonSkill {
     private towerVisual: Skill | null = null;
     private towerAnimations: Animation[] = [];
     private towerBeamNode: Node | null = null;
+    private towerBeamMirrorNode: Node | null = null;
     private towerBeamAnimations: Animation[] = [];
     private towerBeamBaseScale = new Vec3(1, 1, 1);
     private readonly towerPosition = new Vec3();
@@ -2670,25 +3787,60 @@ export class PurificationTowerSkill extends SummonSkill {
         this.summonDuration = 30 + this.level * 2.8;
         this.activeDuration = 4.8 + this.level * 0.3;
         this.respawnCooldown = Math.max(1.9, 3.2 - (this.level - 1) * 0.08);
-        this.beamRange = 60 + this.level * 14;
+        this.beamRange = this.getBeamRangeForLevel(this.level);
         this.beamHalfAngle = Math.min(Math.PI / 3, Math.PI / 7 + (this.level - 1) * (Math.PI / 90));
         this.beamRotationSpeed = Math.PI * (0.48 + this.level * 0.03);
         this.damagePerTick = 8 + this.level * 5;
         this.damageTickInterval = Math.max(0.12, 0.24 - (this.level - 1) * 0.008);
+        this.immobilizeDuration = Math.max(0.14, this.damageTickInterval + 0.06);
         this.minSpawnDistance = 88;
         this.maxSpawnDistance = 180 + this.level * 12;
+        this.applyTransformBonuses();
+    }
+
+    private applyTransformBonuses(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        this.activeDuration = this.summonDuration;
+        this.respawnCooldown = 0;
+        this.beamRotationSpeed *= 2;
+        this.beamHalfAngle = Math.min(Math.PI / 2.2, this.beamHalfAngle * 1.5);
+        this.damagePerTick *= 1.3;
+        this.damageTickInterval = Math.max(0.1, this.damageTickInterval * 0.82);
+        this.immobilizeDuration = Math.max(0.16, this.damageTickInterval + 0.1);
+    }
+
+    private getBeamRangeForLevel(level: number): number {
+        const visibleWidth = view.getVisibleSize().width;
+        const screenWidth = visibleWidth > 0
+            ? visibleWidth
+            : PurificationTowerSkill.BEAM_SCREEN_WIDTH_FALLBACK;
+        const maxLevel = Math.max(1, PurificationTowerSkill.CONFIG.maxLevel ?? 10);
+        const normalizedLevel = Math.max(1, Math.min(maxLevel, Math.floor(level)));
+        const levelProgress = maxLevel <= 1 ? 0 : (normalizedLevel - 1) / (maxLevel - 1);
+        const widthRatio = PurificationTowerSkill.BEAM_MIN_SCREEN_WIDTH_RATIO
+            + (PurificationTowerSkill.BEAM_MAX_SCREEN_WIDTH_RATIO - PurificationTowerSkill.BEAM_MIN_SCREEN_WIDTH_RATIO) * levelProgress;
+        return screenWidth * widthRatio;
     }
 
     public levelUp(): void {
         super.levelUp();
         this.updateByLevel();
+        if (this.isTowerActive) {
+            this.refreshOverloadTowerState();
+        }
     }
 
     public getDescription(): string {
         const transformedText = this.isTransformed
-            ? '终极形态预留中，当前先保留基础净化塔轮转与旋转光束逻辑。'
+            ? '终阶「灯塔过载」：单塔常驻至召唤结束，部署在玩家与最近敌人之间，双向扇形光束高速旋转扫射。'
             : '净化塔会在玩家附近不同位置轮换部署，并持续旋转扫描敌人。';
-        return `净化塔每次出现后会在原地持续 ${this.activeDuration.toFixed(1)}s，射出半径 ${Math.round(this.beamRange)} 的扇形光束并持续旋转；消失后等待 ${this.respawnCooldown.toFixed(1)}s，再在玩家附近重新出现。${transformedText}`;
+        const lifetimeText = this.isTransformed
+            ? `过载塔将持续至本次召唤结束（约 ${this.summonDuration.toFixed(1)}s）`
+            : `每次出现后持续 ${this.activeDuration.toFixed(1)}s，消失后等待 ${this.respawnCooldown.toFixed(1)}s 再在附近重新部署`;
+        return `${lifetimeText}，射出约占屏幕宽度 ${Math.round(PurificationTowerSkill.BEAM_MIN_SCREEN_WIDTH_RATIO * 100)}%~${Math.round(PurificationTowerSkill.BEAM_MAX_SCREEN_WIDTH_RATIO * 100)}%（当前约 ${Math.round(this.beamRange)}）的扇形光束，被照射的敌人会短暂定身。${transformedText}`;
     }
 
     public update(dt: number): void {
@@ -2719,7 +3871,7 @@ export class PurificationTowerSkill extends SummonSkill {
             this.applyBeamDamage();
         }
 
-        if (this.towerElapsed >= this.activeDuration) {
+        if (!this.isTransformed && this.towerElapsed >= this.activeDuration) {
             this.dismissTower();
         }
     }
@@ -2776,7 +3928,11 @@ export class PurificationTowerSkill extends SummonSkill {
         this.towerAnimations = visual.node.getComponentsInChildren(Animation);
         this.towerBeamNode = visual.node.getChildByName('beam');
         this.towerBeamAnimations = this.towerBeamNode?.getComponentsInChildren(Animation) ?? [];
-        this.towerBeamBaseScale.set(this.towerBeamNode?.scale ?? Vec3.ONE);
+        // 对象池复用时 beam 子节点会保留上次缩放，必须先重置再取基准
+        if (this.towerBeamNode) {
+            this.towerBeamNode.setScale(1, 1, 1);
+        }
+        this.towerBeamBaseScale.set(1, 1, 1);
         this.isTowerActive = true;
         this.towerElapsed = 0;
         this.respawnElapsed = 0;
@@ -2785,6 +3941,7 @@ export class PurificationTowerSkill extends SummonSkill {
 
         this.syncTowerToWorld();
         this.playTowerAnimations();
+        this.ensureBeamMirrorVisual();
         this.updateTowerVisual(0);
     }
 
@@ -2796,6 +3953,11 @@ export class PurificationTowerSkill extends SummonSkill {
     }
 
     private pickTowerPosition(): void {
+        if (this.isTransformed) {
+            this.pickOverloadTowerPosition();
+            return;
+        }
+
         const ownerPos = this.ownerNode?.worldPosition;
         if (!ownerPos) {
             this.towerPosition.set(0, 0, 0);
@@ -2809,6 +3971,105 @@ export class PurificationTowerSkill extends SummonSkill {
             ownerPos.y + Math.sin(angle) * radius,
             ownerPos.z
         );
+    }
+
+    private pickOverloadTowerPosition(): void {
+        const ownerPos = this.ownerNode?.worldPosition;
+        if (!ownerPos) {
+            this.towerPosition.set(0, 0, 0);
+            return;
+        }
+
+        const nearestEnemy = this.findNearestEnemyToOwner();
+        if (nearestEnemy) {
+            const enemyPos = nearestEnemy.node.worldPosition;
+            this.towerPosition.set(
+                ownerPos.x + (enemyPos.x - ownerPos.x) * 0.55,
+                ownerPos.y + (enemyPos.y - ownerPos.y) * 0.55,
+                ownerPos.z
+            );
+            return;
+        }
+
+        const angle = Math.random() * Math.PI * 2;
+        const radius = this.minSpawnDistance + Math.random() * Math.max(0, this.maxSpawnDistance - this.minSpawnDistance) * 0.5;
+        this.towerPosition.set(
+            ownerPos.x + Math.cos(angle) * radius,
+            ownerPos.y + Math.sin(angle) * radius,
+            ownerPos.z
+        );
+    }
+
+    private findNearestEnemyToOwner(): Enemy | null {
+        const ownerPos = this.ownerNode?.worldPosition;
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!ownerPos || !enemyRoot) {
+            return null;
+        }
+
+        let nearestEnemy: Enemy | null = null;
+        let nearestDistanceSq = Number.POSITIVE_INFINITY;
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead || enemy.isDyingState) {
+                continue;
+            }
+
+            const dx = enemyNode.worldPosition.x - ownerPos.x;
+            const dy = enemyNode.worldPosition.y - ownerPos.y;
+            const distanceSq = dx * dx + dy * dy;
+            if (distanceSq < nearestDistanceSq) {
+                nearestDistanceSq = distanceSq;
+                nearestEnemy = enemy;
+            }
+        }
+
+        return nearestEnemy;
+    }
+
+    private refreshOverloadTowerState(): void {
+        this.ensureBeamMirrorVisual();
+        this.updateTowerVisual(0);
+    }
+
+    private ensureBeamMirrorVisual(): void {
+        this.clearBeamMirror();
+        if (!this.isTransformed || !this.towerBeamNode?.parent) {
+            this.applyBeamTint();
+            return;
+        }
+
+        this.towerBeamMirrorNode = instantiate(this.towerBeamNode);
+        this.towerBeamMirrorNode.name = 'beam_mirror';
+        this.towerBeamMirrorNode.parent = this.towerBeamNode.parent;
+        this.towerBeamMirrorNode.setSiblingIndex(this.towerBeamNode.getSiblingIndex() + 1);
+        this.applyBeamTint();
+    }
+
+    private applyBeamTint(): void {
+        const primarySprite = this.towerBeamNode?.getComponent(Sprite);
+        if (primarySprite) {
+            primarySprite.color = new Color(
+                255,
+                255,
+                255,
+                this.isTransformed
+                    ? PurificationTowerSkill.BEAM_OVERLOAD_PRIMARY_ALPHA
+                    : PurificationTowerSkill.BEAM_NORMAL_ALPHA
+            );
+        }
+
+        const mirrorSprite = this.towerBeamMirrorNode?.getComponent(Sprite);
+        if (mirrorSprite) {
+            mirrorSprite.color = new Color(255, 255, 255, PurificationTowerSkill.BEAM_OVERLOAD_MIRROR_ALPHA);
+        }
+    }
+
+    private clearBeamMirror(): void {
+        if (this.towerBeamMirrorNode) {
+            this.towerBeamMirrorNode.destroy();
+            this.towerBeamMirrorNode = null;
+        }
     }
 
     private syncTowerToWorld(): void {
@@ -2839,18 +4100,37 @@ export class PurificationTowerSkill extends SummonSkill {
 
         this.syncTowerToWorld();
         this.beamAngle += this.beamRotationSpeed * dt;
-        this.towerBeamNode.setRotationFromEuler(0, 0, this.beamAngle * 180 / Math.PI);
+        this.towerBeamNode.setRotationFromEuler(
+            0,
+            0,
+            this.beamAngle * 180 / Math.PI - PurificationTowerSkill.BEAM_ART_OFFSET_DEG
+        );
 
         const baseLength = this.getTowerBeamBaseLength(this.towerBeamNode);
-        const rangeScale = Math.max(0.18, this.beamRange / Math.max(1, baseLength));
+        const rangeScale = this.beamRange / Math.max(1, baseLength);
         this.tempBeamScale.set(
             this.towerBeamBaseScale.x * rangeScale,
             this.towerBeamBaseScale.y * rangeScale,
             this.towerBeamBaseScale.z
         );
         this.towerBeamNode.setScale(this.tempBeamScale);
+        if (this.towerBeamMirrorNode) {
+            this.towerBeamMirrorNode.setRotationFromEuler(
+                0,
+                0,
+                (this.beamAngle + Math.PI) * 180 / Math.PI - PurificationTowerSkill.BEAM_ART_OFFSET_DEG
+            );
+            this.towerBeamMirrorNode.setScale(this.tempBeamScale);
+        }
+        // beam 锚点 (0,0) 在扇形顶点，与贴图发射点一致
         this.towerBeamNode.getWorldPosition(this.beamOrigin);
     }
+
+
+
+
+
+
 
     private applyBeamDamage(): void {
         if (!this.ownerNode || !this.towerBeamNode || isSkillDamageDisabledForTesting(PurificationTowerSkill.CONFIG.id)) {
@@ -2862,10 +4142,9 @@ export class PurificationTowerSkill extends SummonSkill {
             return;
         }
 
-        const beamDirectionX = Math.cos(this.beamAngle + Math.PI * 0.5);
-        const beamDirectionY = Math.sin(this.beamAngle + Math.PI * 0.5);
-        const cosHalfAngle = Math.cos(this.beamHalfAngle);
-        const maxDistanceSq = this.beamRange * this.beamRange;
+        const beamCenterAngles = this.isTransformed
+            ? [this.beamAngle, this.beamAngle + Math.PI]
+            : [this.beamAngle];
 
         for (const enemyNode of enemyRoot.children) {
             const enemy = enemyNode.getComponent(Enemy);
@@ -2873,30 +4152,67 @@ export class PurificationTowerSkill extends SummonSkill {
                 continue;
             }
 
-            this.tempEnemyDelta.set(
-                enemyNode.worldPosition.x - this.beamOrigin.x,
-                enemyNode.worldPosition.y - this.beamOrigin.y,
-                0
-            );
-
-            const distanceSq = this.tempEnemyDelta.lengthSqr();
-            if (distanceSq <= 0.0001 || distanceSq > maxDistanceSq) {
-                continue;
+            let isHit = false;
+            for (const centerAngle of beamCenterAngles) {
+                if (this.isEnemyInsideBeamSector(enemyNode, centerAngle)) {
+                    isHit = true;
+                    break;
+                }
             }
 
-            const distance = Math.sqrt(distanceSq);
-            const dirX = this.tempEnemyDelta.x / distance;
-            const dirY = this.tempEnemyDelta.y / distance;
-            const dot = dirX * beamDirectionX + dirY * beamDirectionY;
-            if (dot < cosHalfAngle) {
+            if (!isHit) {
                 continue;
             }
 
             enemy.takeDamage(Math.max(1, Math.round(this.damagePerTick)), this.ownerNode);
+            this.applyBeamImmobilize(enemy);
         }
     }
 
+    private applyBeamImmobilize(enemy: Enemy): void {
+        if (enemy.isBoss) {
+            enemy.applyMovementDebuff(this.immobilizeDuration * 0.6, 0.32);
+            return;
+        }
+
+        enemy.applyStun(this.immobilizeDuration);
+    }
+
+    private isEnemyInsideBeamSector(enemyNode: Node, beamCenterAngle: number): boolean {
+        const beamDirectionX = Math.cos(beamCenterAngle);
+        const beamDirectionY = Math.sin(beamCenterAngle);
+        const cosHalfAngle = Math.cos(this.beamHalfAngle);
+        const maxDistanceSq = this.beamRange * this.beamRange;
+
+        this.tempEnemyDelta.set(
+            enemyNode.worldPosition.x - this.beamOrigin.x,
+            enemyNode.worldPosition.y - this.beamOrigin.y,
+            0
+        );
+
+        const distanceSq = this.tempEnemyDelta.lengthSqr();
+        if (distanceSq <= 0.0001 || distanceSq > maxDistanceSq) {
+            return false;
+        }
+
+        const distance = Math.sqrt(distanceSq);
+        const dirX = this.tempEnemyDelta.x / distance;
+        const dirY = this.tempEnemyDelta.y / distance;
+        return dirX * beamDirectionX + dirY * beamDirectionY >= cosHalfAngle;
+    }
+
     private getTowerBeamBaseLength(node: Node): number {
+        // 使用 UITransform 的 contentSize.width 作为基准长度，
+        // 因为 beam 的 Sprite 实际显示在 UITransform 的 contentSize 中，
+        // 缩放 X 轴时视觉长度 = contentSize.width * scaleX。
+        // 之前使用 SpriteFrame 的 originalSize (64x64) 会导致缩放比例计算错误，
+        // 使得视觉长度比实际伤害范围 (beamRange) 大 1.56 倍。
+        const transform = node.getComponent(UITransform);
+        if (transform) {
+            return Math.max(1, transform.contentSize.width);
+        }
+
+        // 回退：如果找不到 UITransform，尝试使用 SpriteFrame 的原始尺寸
         const sprite = node.getComponent(Sprite);
         const spriteFrame = sprite?.spriteFrame as any;
         const originalSize = spriteFrame?.originalSize as { width?: number; height?: number } | undefined;
@@ -2904,9 +4220,9 @@ export class PurificationTowerSkill extends SummonSkill {
             return Math.max(1, Math.max(originalSize.width ?? 0, originalSize.height ?? 0));
         }
 
-        const transform = node.getComponent(UITransform);
-        return Math.max(1, Math.max(transform?.contentSize.width ?? 0, transform?.contentSize.height ?? 0, this.beamVisualBaseLengthFallback));
+        return this.beamVisualBaseLengthFallback;
     }
+
 
     private configureTowerCollision(visual: Skill): void {
         if (!visual.body) {
@@ -2928,6 +4244,7 @@ export class PurificationTowerSkill extends SummonSkill {
     }
 
     private dismissTowerVisualOnly(): void {
+        this.clearBeamMirror();
         if (this.towerVisual) {
             tween(this.towerVisual.node).stop();
             Skill.put(this.towerVisual);
@@ -3609,6 +4926,12 @@ export class TrashGuardSkill extends SummonSkill {
     private castControlRadiusFactor = 1.0;
     private castSlowDuration = 0.12;
     private castKillSuctionDuration = 0.26;
+    private compressionCastsThreshold = 3;
+    private compressionRadiusFactor = 1.5;
+    private compressionExecuteHpRatio = 0.15;
+    private compressionDamageMultiplier = 1.28;
+    private castsSinceCompression = 0;
+    private isCompressionCast = false;
     private readonly baseCastDamage = 24;
     private readonly castDamageGrowthPerLevel = 10;
     private readonly castDamageTuningMultiplier = 1;
@@ -3673,11 +4996,41 @@ export class TrashGuardSkill extends SummonSkill {
         this.castSlowDuration = this.castLockDuration + 0.08;
         // 提升等级后更少消失，更像稳定随从。
         this.vanishEveryCasts = Math.max(2, 4 - Math.floor(this.level / 4));
+        this.castsSinceCompression = 0;
+        this.isCompressionCast = false;
+        this.applyTransformBonuses();
+    }
+
+    private applyTransformBonuses(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        this.vanishEveryCasts = 99;
+        this.attackInterval = Math.max(0.95, this.attackInterval * 0.9);
+        this.attackRadius = Math.round(this.attackRadius * 1.08);
+        this.castLockDuration = Math.max(0.42, this.castLockDuration * 1.08);
+        this.castSlowDuration = this.castLockDuration + 0.12;
+        this.compressionCastsThreshold = 3;
+        this.compressionRadiusFactor = 1.5;
+        this.compressionExecuteHpRatio = 0.15;
+        this.compressionDamageMultiplier = 1.28;
+        this.castKillSuctionDuration = 0.34;
     }
 
     public levelUp(): void {
         super.levelUp();
         this.updateByLevel();
+    }
+
+    public getDescription(): string {
+        const transformedText = this.isTransformed
+            ? '终阶「压缩粉碎」：稳定驻场不再隐身，每 3 次攻击进入压缩模式，大范围吸扯并斩杀低血目标。'
+            : '满级后进化为压缩粉碎，减少隐身并周期性发动压缩斩杀。';
+        const overloadText = this.isTransformed
+            ? `压缩模式吸力范围 ×${this.compressionRadiusFactor.toFixed(1)}，对血量 ≤${Math.round(this.compressionExecuteHpRatio * 100)}% 的非 Boss 敌人执行粉碎。`
+            : '';
+        return `卫兵环绕玩家移动，每 ${this.attackInterval.toFixed(1)}s 释放吸力打击，范围 ${Math.round(this.attackRadius)}，单次 ${this.castDamage} 伤害。${overloadText}${transformedText}`;
     }
 
     public update(dt: number): void {
@@ -3730,7 +5083,7 @@ export class TrashGuardSkill extends SummonSkill {
                 this.isCasting = false;
                 this.castLockElapsed = 0;
                 this.castsSinceVanish++;
-                if (this.castsSinceVanish >= this.vanishEveryCasts) {
+                if (!this.isTransformed && this.castsSinceVanish >= this.vanishEveryCasts) {
                     this.castsSinceVanish = 0;
                     const remainTime = this.summonDuration - this.summonElapsed;
                     // 召唤即将结束时不再进入隐身，避免出现“消失后看起来再也不回来”的观感。
@@ -3738,6 +5091,8 @@ export class TrashGuardSkill extends SummonSkill {
                         this.isVanishing = true;
                         this.guardVisual.node.active = false;
                     }
+                } else if (this.isTransformed && this.castsSinceVanish >= this.vanishEveryCasts) {
+                    this.castsSinceVanish = 0;
                 }
             }
             return;
@@ -3797,6 +5152,8 @@ export class TrashGuardSkill extends SummonSkill {
         this.isVanishing = false;
         this.isRepositioningForCast = false;
         this.castsSinceVanish = 0;
+        this.castsSinceCompression = 0;
+        this.isCompressionCast = false;
 
         this.pickStandbyOffset();
         this.guardPosition.set(this.ownerNode.worldPosition);
@@ -3856,18 +5213,33 @@ export class TrashGuardSkill extends SummonSkill {
             return;
         }
 
+        if (this.isTransformed) {
+            this.castsSinceCompression++;
+            this.isCompressionCast = this.castsSinceCompression >= this.compressionCastsThreshold;
+            if (this.isCompressionCast) {
+                this.castsSinceCompression = 0;
+            }
+        } else {
+            this.isCompressionCast = false;
+        }
+
         this.isCasting = true;
         this.castLockElapsed = 0;
         this.castCenterWorldPosition.set(this.guardPosition);
         this.playGuardAttackAnimation();
         this.showVortexChargeEffect();
+        this.setVortexCompressionVisual(this.isCompressionCast);
 
-        // 攻击前摇：短促放大，制造“剧烈释放”感。
+        const peakScale = this.isCompressionCast ? 1.68 : 1.45;
         tween(this.guardVisual.node)
             .stop()
-            .to(0.18, { scale: new Vec3(1.45, 1.45, 1) })
+            .to(0.18, { scale: new Vec3(peakScale, peakScale, 1) })
             .to(0.16, { scale: new Vec3(1, 1, 1) })
             .start();
+    }
+
+    private getActiveCastRadiusFactor(): number {
+        return this.isCompressionCast ? this.compressionRadiusFactor : this.castControlRadiusFactor;
     }
 
     private executeSuctionAndExecution(): void {
@@ -3886,10 +5258,14 @@ export class TrashGuardSkill extends SummonSkill {
             return;
         }
 
-        const radius = this.attackRadius * this.castControlRadiusFactor;
+        const radius = this.attackRadius * this.getActiveCastRadiusFactor();
         const radiusSqr = radius * radius;
+        const castDamage = this.isCompressionCast
+            ? Math.max(1, Math.round(this.castDamage * this.compressionDamageMultiplier))
+            : this.castDamage;
         let killCount = 0;
         let hitCount = 0;
+        let executeCount = 0;
 
         for (const enemyNode of enemyRoot.children) {
             const enemy = enemyNode.getComponent(Enemy);
@@ -3904,23 +5280,45 @@ export class TrashGuardSkill extends SummonSkill {
                 continue;
             }
 
-            const willBeKilled = enemy.currentHp <= this.castDamage;
+            const willBeKilled = enemy.currentHp <= castDamage;
             if (willBeKilled) {
                 enemy.setSuctionDeathTarget(this.castCenterWorldPosition, this.castKillSuctionDuration);
             }
 
-            enemy.takeDamage(this.castDamage, this.ownerNode);
+            enemy.takeDamage(castDamage, this.ownerNode);
             hitCount++;
             if (willBeKilled) {
+                killCount++;
+                continue;
+            }
+
+            if (this.isCompressionCast && this.tryExecuteLowHpEnemy(enemy)) {
+                executeCount++;
                 killCount++;
             }
         }
 
         if (hitCount > 0) {
-            console.log(`[召唤] 垃圾桶卫兵释放收束打击，命中 ${hitCount} 个目标，击杀 ${killCount} 个目标，单次伤害 ${this.castDamage}`);
+            const modeLabel = this.isCompressionCast ? '压缩粉碎' : '收束打击';
+            console.log(`[召唤] 垃圾桶卫兵释放${modeLabel}，命中 ${hitCount} 个目标，击杀 ${killCount} 个目标（斩杀 ${executeCount}），单次伤害 ${castDamage}`);
         }
 
         this.playVortexCastEffect(() => this.playGuardMoveAnimation());
+    }
+
+    private tryExecuteLowHpEnemy(enemy: Enemy): boolean {
+        if (enemy.isBoss || enemy.isDead || enemy.maxHp <= 0) {
+            return false;
+        }
+
+        const hpRatio = enemy.currentHp / enemy.maxHp;
+        if (hpRatio > this.compressionExecuteHpRatio) {
+            return false;
+        }
+
+        enemy.setSuctionDeathTarget(this.castCenterWorldPosition, this.castKillSuctionDuration);
+        enemy.takeDamage(enemy.currentHp, this.ownerNode);
+        return true;
     }
 
     private applyCastControl(): void {
@@ -3929,7 +5327,7 @@ export class TrashGuardSkill extends SummonSkill {
             return;
         }
 
-        const radius = this.attackRadius * this.castControlRadiusFactor;
+        const radius = this.attackRadius * this.getActiveCastRadiusFactor();
         const radiusSqr = radius * radius;
         for (const enemyNode of enemyRoot.children) {
             const enemy = enemyNode.getComponent(Enemy);
@@ -3944,7 +5342,10 @@ export class TrashGuardSkill extends SummonSkill {
                 continue;
             }
 
-            enemy.applyMovementDebuff(this.castSlowDuration, enemy.isBoss ? 0.28 : 0);
+            const slowMultiplier = this.isCompressionCast
+                ? (enemy.isBoss ? 0.5 : 0.34)
+                : (enemy.isBoss ? 0.28 : 0);
+            enemy.applyMovementDebuff(this.castSlowDuration, slowMultiplier);
         }
     }
 
@@ -3981,6 +5382,8 @@ export class TrashGuardSkill extends SummonSkill {
         this.isVanishing = false;
         this.isRepositioningForCast = false;
         this.castsSinceVanish = 0;
+        this.castsSinceCompression = 0;
+        this.isCompressionCast = false;
         this.guardAnimations = [];
         this.guardVisualPrefab = null;
         this.guardVortexNode = null;
@@ -4151,6 +5554,7 @@ export class TrashGuardSkill extends SummonSkill {
 
     private playGuardMoveAnimation(): void {
         this.playGuardAnimation(this.guardMoveAnimationClipName);
+        this.setVortexCompressionVisual(false);
         this.hideGuardVortex();
     }
 
@@ -4205,16 +5609,17 @@ export class TrashGuardSkill extends SummonSkill {
             return;
         }
 
-        const fullRangeScale = this.getVortexScaleForRadius(1.0);
-        const overdriveScale = this.getVortexScaleForRadius(1.08);
+        const radiusVisualFactor = this.isCompressionCast ? this.compressionRadiusFactor : 1;
+        const fullRangeScale = this.getVortexScaleForRadius(radiusVisualFactor);
+        const overdriveScale = this.getVortexScaleForRadius(radiusVisualFactor * 1.08);
 
         tween(this.guardVortexNode).stop();
         this.guardVortexNode.active = true;
         this.guardVortexNode.setScale(this.vortexChargeScale);
 
         tween(this.guardVortexNode)
-            .to(0.18, { scale: fullRangeScale })
-            .to(0.18, { scale: overdriveScale })
+            .to(this.isCompressionCast ? 0.24 : 0.18, { scale: fullRangeScale })
+            .to(this.isCompressionCast ? 0.22 : 0.18, { scale: overdriveScale })
             .to(0.22, { scale: this.vortexHiddenScale })
             .call(() => {
                 if (!this.guardVortexNode) {
@@ -4222,9 +5627,23 @@ export class TrashGuardSkill extends SummonSkill {
                     return;
                 }
                 this.guardVortexNode.active = false;
+                this.setVortexCompressionVisual(false);
                 onComplete?.();
             })
             .start();
+    }
+
+    private setVortexCompressionVisual(active: boolean): void {
+        if (!this.guardVortexNode) {
+            return;
+        }
+
+        const sprites = this.guardVortexNode.getComponentsInChildren(Sprite);
+        for (const sprite of sprites) {
+            sprite.color = active
+                ? new Color(42, 34, 82, sprite.color.a)
+                : new Color(255, 255, 255, sprite.color.a);
+        }
     }
 
     private showVortexChargeEffect(): void {
@@ -4232,9 +5651,10 @@ export class TrashGuardSkill extends SummonSkill {
             return;
         }
 
-        const chargeScale = this.getVortexScaleForRadius(0.72);
+        const radiusVisualFactor = this.isCompressionCast ? this.compressionRadiusFactor : 1;
+        const chargeScale = this.getVortexScaleForRadius(0.72 * radiusVisualFactor);
         this.vortexChargeScale.set(chargeScale);
-        this.vortexCastScale.set(this.getVortexScaleForRadius(1.0));
+        this.vortexCastScale.set(this.getVortexScaleForRadius(radiusVisualFactor));
 
         tween(this.guardVortexNode).stop();
         this.guardVortexNode.active = true;
@@ -4263,6 +5683,13 @@ export class TrashGuardSkill extends SummonSkill {
 export class MopGhostSkill extends SummonSkill {
     private static readonly IDLE_CLIP_NAME = 'idle';
     private static readonly ATTACK_CLIP_NAME = 'tuodiyouling_attack';
+    private static readonly MERGED_TRAIL_TICK_INTERVAL = 1;
+    private static readonly MAX_TRAIL_MERGE_COUNT = 2;
+    private static readonly MAX_MERGED_RADIUS_X = 72;
+    private static readonly MAX_MERGED_RADIUS_Y = 34;
+    private static readonly MAX_ACTIVE_TRAILS = 12;
+    private static readonly NORMAL_TRAIL_COLOR = new Color(72, 182, 255);
+    private static readonly MERGED_TRAIL_COLOR = new Color(42, 148, 228);
 
     static CONFIG: SkillConfig = {
         id: 'mop_ghost',
@@ -4289,7 +5716,12 @@ export class MopGhostSkill extends SummonSkill {
     private trailSpawnInterval = 18;
     private trailSlowDuration = 0.42;
     private trailSlowMultiplier = 0.62;
-    private transformedReservedMultiplier = 1;
+    private attackDamageMultiplier = 1;
+    private trailMergeRadius = 0;
+    private mergedTrailTickDamage = 0;
+    private mergedTrailSlowMultiplier = 0.4;
+    private dashChainRemaining = 0;
+    private lastDashTargetEnemy: Enemy | null = null;
 
     private ownerNode: Node | null = null;
     private summonParent: Node | null = null;
@@ -4309,6 +5741,7 @@ export class MopGhostSkill extends SummonSkill {
     private readonly tempOwnerOffset = new Vec3();
     private readonly tempLocalPosition = new Vec3();
     private readonly ghostBaseScale = new Vec3(1, 1, 1);
+    private readonly tempScale = new Vec3(1, 1, 1);
     private readonly hitEnemiesThisDash = new Set<Enemy>();
     private readonly trailStates: MopTrailState[] = [];
 
@@ -4335,7 +5768,28 @@ export class MopGhostSkill extends SummonSkill {
         this.trailSpawnInterval = Math.max(12, this.trailWidth * 0.7);
         this.trailSlowDuration = 0.26 + this.level * 0.03;
         this.trailSlowMultiplier = Math.max(0.26, 0.78 - this.level * 0.04);
-        this.transformedReservedMultiplier = this.isTransformed ? 1.2 : 1;
+        this.attackDamageMultiplier = 1;
+        this.trailMergeRadius = 0;
+        this.mergedTrailTickDamage = 0;
+        this.applyTransformBonuses();
+    }
+
+    private applyTransformBonuses(): void {
+        if (!this.isTransformed) {
+            return;
+        }
+
+        this.attackInterval = Math.max(1.2, this.attackInterval * 0.88);
+        this.attackDamageMultiplier = 1.18;
+        this.dashMoveSpeed = Math.round(this.dashMoveSpeed * 1.12);
+        this.trailDuration += 0.45;
+        this.trailWidth = Math.round(this.trailWidth * 1.18);
+        this.trailLength = this.trailWidth * 1.72;
+        this.trailSpawnInterval = Math.max(14, this.trailSpawnInterval * 0.82);
+        this.trailSlowMultiplier = Math.max(0.38, this.trailSlowMultiplier * 0.72);
+        this.trailMergeRadius = this.trailWidth * 0.42;
+        this.mergedTrailTickDamage = Math.max(4, Math.round(this.attackDamage * 0.14));
+        this.mergedTrailSlowMultiplier = 0.4;
     }
 
     public levelUp(): void {
@@ -4377,6 +5831,7 @@ export class MopGhostSkill extends SummonSkill {
             return;
         }
 
+        this.syncTransformedGhostVisual();
         this.followOwner(dt);
     }
 
@@ -4386,9 +5841,12 @@ export class MopGhostSkill extends SummonSkill {
 
     public getDescription(): string {
         const transformedText = this.isTransformed
-            ? '终阶形态预留中，当前先保留数值增幅接口。'
-            : '终阶形态暂未设计，逻辑接口已预留。';
-        return `每 ${this.attackInterval.toFixed(1)}s 突进最近敌人，碰撞造成 ${Math.round(this.attackDamage)} 伤害，并留下更宽的蓝色水渍减速敌人。${transformedText}`;
+            ? '终阶「湿地领域」：连续双段突进，水渍自动连片成湿地并持续撕扯减速。'
+            : '满级后进化为湿地领域，水渍连片并追加双段突进。';
+        const overloadText = this.isTransformed
+            ? `湿地移速降至 ${Math.round(this.mergedTrailSlowMultiplier * 100)}%，每秒 ${this.mergedTrailTickDamage} 点撕扯伤害。`
+            : '';
+        return `每 ${this.attackInterval.toFixed(1)}s 突进最近敌人，碰撞造成 ${Math.round(this.attackDamage * this.attackDamageMultiplier)} 伤害，并留下蓝色水渍减速敌人。${overloadText}${transformedText}`;
     }
 
     protected onSummon(context: SkillContext): void {
@@ -4434,7 +5892,22 @@ export class MopGhostSkill extends SummonSkill {
         this.ghostPosition.set(this.ownerNode.worldPosition);
         this.ghostPosition.add(this.standbyOffset);
         this.syncGhostToWorld(this.ghostPosition);
+        this.syncTransformedGhostVisual();
         this.playGhostAnimation(MopGhostSkill.IDLE_CLIP_NAME);
+    }
+
+    private syncTransformedGhostVisual(): void {
+        if (!this.ghostVisual) {
+            return;
+        }
+
+        const scaleBoost = this.isTransformed ? 1.12 : 1;
+        this.tempScale.set(
+            this.ghostBaseScale.x * scaleBoost,
+            this.ghostBaseScale.y * scaleBoost,
+            this.ghostBaseScale.z
+        );
+        this.ghostVisual.setScale(this.tempScale);
     }
 
     private followOwner(dt: number): void {
@@ -4452,10 +5925,15 @@ export class MopGhostSkill extends SummonSkill {
         this.moveGhostTowards(this.desiredWorldPosition, this.followMoveSpeed, dt);
     }
 
-    private beginAttack(): boolean {
-        const nearestEnemy = this.findNearestEnemy(this.ghostPosition);
+    private beginAttack(excludeEnemy?: Enemy | null): boolean {
+        const nearestEnemy = this.findNearestEnemy(this.ghostPosition, excludeEnemy ?? null);
         if (!nearestEnemy) {
             return false;
+        }
+
+        if (!excludeEnemy) {
+            this.lastDashTargetEnemy = nearestEnemy;
+            this.dashChainRemaining = this.isTransformed ? 1 : 0;
         }
 
         const targetPosition = nearestEnemy.node.worldPosition;
@@ -4493,14 +5971,23 @@ export class MopGhostSkill extends SummonSkill {
     }
 
     private finishAttack(): void {
+        if (this.isTransformed && this.dashChainRemaining > 0) {
+            this.dashChainRemaining--;
+            if (this.beginAttack(this.lastDashTargetEnemy)) {
+                return;
+            }
+        }
+
         this.isAttacking = false;
         this.distanceSinceTrailSpawn = 0;
         this.hitEnemiesThisDash.clear();
+        this.lastDashTargetEnemy = null;
+        this.dashChainRemaining = 0;
         this.playGhostAnimation(MopGhostSkill.IDLE_CLIP_NAME);
         this.pickStandbyOffset();
     }
 
-    private findNearestEnemy(origin: Vec3): Enemy | null {
+    private findNearestEnemy(origin: Vec3, excludeEnemy: Enemy | null = null): Enemy | null {
         const enemyRoot = BulletHell.inst?.objects;
         if (!enemyRoot) {
             return null;
@@ -4510,7 +5997,7 @@ export class MopGhostSkill extends SummonSkill {
         let nearestDistanceSq = Number.POSITIVE_INFINITY;
         for (const enemyNode of enemyRoot.children) {
             const enemy = enemyNode.getComponent(Enemy);
-            if (!enemy || enemy.isDead || enemy.isDyingState) {
+            if (!enemy || enemy.isDead || enemy.isDyingState || enemy === excludeEnemy) {
                 continue;
             }
 
@@ -4549,7 +6036,7 @@ export class MopGhostSkill extends SummonSkill {
                 continue;
             }
 
-            enemy.takeDamage(Math.round(this.attackDamage * this.transformedReservedMultiplier), this.ownerNode);
+            enemy.takeDamage(Math.round(this.attackDamage * this.attackDamageMultiplier), this.ownerNode);
             this.hitEnemiesThisDash.add(enemy);
         }
     }
@@ -4563,10 +6050,14 @@ export class MopGhostSkill extends SummonSkill {
         for (let i = this.trailStates.length - 1; i >= 0; i--) {
             const trail = this.trailStates[i];
             trail.elapsed += dt;
+            trail.tickElapsed += dt;
 
             if (enemyRoot) {
                 const radiusXSq = trail.radiusX * trail.radiusX;
                 const radiusYSq = trail.radiusY * trail.radiusY;
+                const slowMultiplier = trail.isMergedZone
+                    ? trail.zoneSlowMultiplier
+                    : this.trailSlowMultiplier;
                 for (const enemyNode of enemyRoot.children) {
                     const enemy = enemyNode.getComponent(Enemy);
                     if (!enemy || enemy.isDead || enemy.isDyingState) {
@@ -4577,8 +6068,18 @@ export class MopGhostSkill extends SummonSkill {
                     const dy = enemyNode.worldPosition.y - trail.worldPosition.y;
                     const ellipseFactor = (dx * dx) / Math.max(1, radiusXSq) + (dy * dy) / Math.max(1, radiusYSq);
                     if (ellipseFactor <= 1) {
-                        enemy.applyMovementDebuff(this.trailSlowDuration, enemy.isBoss ? Math.max(0.58, this.trailSlowMultiplier + 0.18) : this.trailSlowMultiplier);
+                        const bossSlow = trail.isMergedZone
+                            ? Math.max(0.48, slowMultiplier + 0.12)
+                            : Math.max(0.58, slowMultiplier + 0.18);
+                        enemy.applyMovementDebuff(this.trailSlowDuration, enemy.isBoss ? bossSlow : slowMultiplier);
                     }
+                }
+            }
+
+            if (trail.isMergedZone && trail.tickDamage > 0) {
+                while (trail.tickElapsed >= MopGhostSkill.MERGED_TRAIL_TICK_INTERVAL) {
+                    trail.tickElapsed -= MopGhostSkill.MERGED_TRAIL_TICK_INTERVAL;
+                    this.tickMergedTrailDamage(trail);
                 }
             }
 
@@ -4607,6 +6108,11 @@ export class MopGhostSkill extends SummonSkill {
             return;
         }
 
+        if (this.isTransformed && this.trailStates.length >= MopGhostSkill.MAX_ACTIVE_TRAILS) {
+            const oldest = this.trailStates.shift();
+            oldest?.node.destroy();
+        }
+
         const node = new Node('MopGhostTrail');
         const graphics = node.addComponent(Graphics);
         const transform = node.addComponent(UITransform);
@@ -4625,18 +6131,113 @@ export class MopGhostSkill extends SummonSkill {
             radiusY: this.trailWidth * 0.5,
             elapsed: 0,
             duration: this.trailDuration,
+            isMergedZone: false,
+            tickDamage: 0,
+            tickElapsed: 0,
+            zoneSlowMultiplier: this.trailSlowMultiplier,
+            mergeCount: 0,
         };
+
+        if (this.isTransformed && this.trailMergeRadius > 0) {
+            for (const existing of this.trailStates) {
+                if (existing.mergeCount >= MopGhostSkill.MAX_TRAIL_MERGE_COUNT) {
+                    continue;
+                }
+
+                const dx = existing.worldPosition.x - worldPosition.x;
+                const dy = existing.worldPosition.y - worldPosition.y;
+                const centerDistance = Math.sqrt(dx * dx + dy * dy);
+                const overlapDistance = Math.min(existing.radiusX, trail.radiusX) * 0.48
+                    + Math.min(existing.radiusY, trail.radiusY) * 0.32;
+                if (centerDistance <= overlapDistance) {
+                    this.mergeTrails(existing, trail);
+                    return;
+                }
+            }
+        }
 
         this.redrawTrail(trail, 1);
         this.trailStates.push(trail);
     }
 
+    private mergeTrails(existing: MopTrailState, incoming: MopTrailState): void {
+        const spanX = Math.abs(existing.worldPosition.x - incoming.worldPosition.x) * 0.5;
+        const spanY = Math.abs(existing.worldPosition.y - incoming.worldPosition.y) * 0.5;
+        existing.worldPosition.set(
+            (existing.worldPosition.x + incoming.worldPosition.x) * 0.5,
+            (existing.worldPosition.y + incoming.worldPosition.y) * 0.5,
+            existing.worldPosition.z
+        );
+        existing.radiusX = Math.min(
+            MopGhostSkill.MAX_MERGED_RADIUS_X,
+            Math.max(existing.radiusX, incoming.radiusX) + spanX * 0.18 + this.trailWidth * 0.06
+        );
+        existing.radiusY = Math.min(
+            MopGhostSkill.MAX_MERGED_RADIUS_Y,
+            Math.max(existing.radiusY, incoming.radiusY) + spanY * 0.14 + this.trailWidth * 0.04
+        );
+
+        const existingRemaining = existing.duration - existing.elapsed;
+        const incomingRemaining = incoming.duration - incoming.elapsed;
+        existing.duration = existing.elapsed + Math.max(existingRemaining, incomingRemaining) + 0.25;
+        existing.isMergedZone = true;
+        existing.mergeCount += 1;
+        existing.tickDamage = this.mergedTrailTickDamage;
+        existing.zoneSlowMultiplier = this.mergedTrailSlowMultiplier;
+
+        if (this.summonParent) {
+            Vec3.subtract(this.tempLocalPosition, existing.worldPosition, this.summonParent.worldPosition);
+            existing.node.setPosition(this.tempLocalPosition);
+        }
+
+        incoming.node.destroy();
+        this.redrawTrail(existing, 1 - existing.elapsed / Math.max(0.001, existing.duration));
+    }
+
+    private tickMergedTrailDamage(trail: MopTrailState): void {
+        if (!this.ownerNode || isSkillDamageDisabledForTesting(MopGhostSkill.CONFIG.id)) {
+            return;
+        }
+
+        const enemyRoot = BulletHell.inst?.objects;
+        if (!enemyRoot || trail.tickDamage <= 0) {
+            return;
+        }
+
+        const radiusXSq = trail.radiusX * trail.radiusX;
+        const radiusYSq = trail.radiusY * trail.radiusY;
+        for (const enemyNode of enemyRoot.children) {
+            const enemy = enemyNode.getComponent(Enemy);
+            if (!enemy || enemy.isDead || enemy.isDyingState) {
+                continue;
+            }
+
+            const dx = enemyNode.worldPosition.x - trail.worldPosition.x;
+            const dy = enemyNode.worldPosition.y - trail.worldPosition.y;
+            const ellipseFactor = (dx * dx) / Math.max(1, radiusXSq) + (dy * dy) / Math.max(1, radiusYSq);
+            if (ellipseFactor <= 1) {
+                const damage = enemy.isBoss ? Math.max(1, Math.round(trail.tickDamage * 0.55)) : trail.tickDamage;
+                enemy.takeDamage(damage, this.ownerNode);
+            }
+        }
+    }
+
     private redrawTrail(trail: MopTrailState, opacityFactor: number): void {
-        const alpha = Math.max(28, Math.min(180, Math.round(150 * opacityFactor)));
+        const baseColor = trail.isMergedZone ? MopGhostSkill.MERGED_TRAIL_COLOR : MopGhostSkill.NORMAL_TRAIL_COLOR;
+        const alphaCap = trail.isMergedZone ? 118 : 150;
+        const alphaBase = trail.isMergedZone ? 92 : 132;
+        const alpha = Math.max(24, Math.min(alphaCap, Math.round(alphaBase * opacityFactor)));
         trail.graphics.clear();
-        trail.graphics.fillColor = new Color(72, 182, 255, alpha);
+        trail.graphics.fillColor = new Color(baseColor.r, baseColor.g, baseColor.b, alpha);
         trail.graphics.roundRect(-trail.radiusX, -trail.radiusY, trail.radiusX * 2, trail.radiusY * 2, trail.radiusY * 0.8);
         trail.graphics.fill();
+
+        if (trail.isMergedZone) {
+            trail.graphics.strokeColor = new Color(168, 228, 255, Math.min(150, alpha + 28));
+            trail.graphics.lineWidth = 2;
+            trail.graphics.roundRect(-trail.radiusX, -trail.radiusY, trail.radiusX * 2, trail.radiusY * 2, trail.radiusY * 0.8);
+            trail.graphics.stroke();
+        }
     }
 
     private syncGhostToWorld(worldPos: Vec3): void {
@@ -4764,6 +6365,8 @@ export class MopGhostSkill extends SummonSkill {
         this.attackElapsed = 0;
         this.distanceSinceTrailSpawn = 0;
         this.hitEnemiesThisDash.clear();
+        this.lastDashTargetEnemy = null;
+        this.dashChainRemaining = 0;
         this.ghostPosition.set(Vec3.ZERO);
     }
 }

@@ -1059,8 +1059,10 @@
     ],
     "fallbackSkillCardIcon": null,
     "debugForcedSkillIds": [],
-    "debugForceSingleSkillId": "purification_tower",
+    "debugForceSingleSkillId": "trash_bag_field",
+    "debugSkillDamageEnabled": true,
     "debugDisableDamageForSingleSkill": false,
+    "debugStartAtLevel10": true,
     "_id": ""
   },
   {

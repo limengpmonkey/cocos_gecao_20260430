@@ -74,7 +74,7 @@
     },
     "_contentSize": {
       "__type__": "cc.Size",
-      "width": 54,
+      "width": 60,
       "height": 61
     },
     "_anchorPoint": {
@@ -110,7 +110,7 @@
       "a": 255
     },
     "_spriteFrame": {
-      "__uuid__": "df546ef2-b5d9-48eb-b59d-d41bd9447e44@f9941",
+      "__uuid__": "51f8f4eb-eac7-49dc-a2b6-76e6b9e9fc08@f9941",
       "__expectedType__": "cc.SpriteFrame"
     },
     "_type": 0,
@@ -146,11 +146,7 @@
     "playOnLoad": false,
     "_clips": [
       {
-        "__uuid__": "b1a73ca4-a804-4db4-adec-7f7c056a25d3",
-        "__expectedType__": "cc.AnimationClip"
-      },
-      {
-        "__uuid__": "dab44535-e9b1-4291-985b-084eafa47546",
+        "__uuid__": "940af75c-d92e-4255-b5e2-68e7bda535d8",
         "__expectedType__": "cc.AnimationClip"
       }
     ],

@@ -136,7 +136,10 @@ export class PlayerSkillSystem extends Component {
     private onSkillSelect(event: SkillSelectEventData): void {
         const skillId = event.skillId;
         const currentLevel = this.skillLevels.get(skillId) || 0;
-        const newLevel = currentLevel + 1;
+        const skillPreview = SkillLibrary.create(skillId, 1);
+        const maxLevel = skillPreview?.config.maxLevel ?? 10;
+        const newLevel = SkillSelectionSystem.inst?.resolveGrantedSkillLevel(currentLevel, maxLevel)
+            ?? Math.min(maxLevel, currentLevel + 1);
         
         // 更新技能等级
         this.skillLevels.set(skillId, newLevel);
