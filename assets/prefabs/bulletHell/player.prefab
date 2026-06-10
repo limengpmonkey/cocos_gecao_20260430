@@ -52,11 +52,11 @@
         "__id__": 108
       },
       {
-        "__id__": 120
+        "__id__": 124
       }
     ],
     "_prefab": {
-      "__id__": 122
+      "__id__": 126
     },
     "_lpos": {
       "__type__": "cc.Vec3",
@@ -1576,9 +1576,6 @@
         "__id__": 110
       },
       {
-        "__id__": 111
-      },
-      {
         "__id__": 112
       },
       {
@@ -1591,9 +1588,6 @@
         "__id__": 115
       },
       {
-        "__id__": 116
-      },
-      {
         "__id__": 117
       },
       {
@@ -1601,6 +1595,12 @@
       },
       {
         "__id__": 119
+      },
+      {
+        "__id__": 121
+      },
+      {
+        "__id__": 122
       }
     ],
     "_id": ""
@@ -1617,7 +1617,19 @@
       "__expectedType__": "cc.Prefab"
     },
     "impactPrefab": null,
-    "levelPrefabs": []
+    "levelPrefabs": [
+      {
+        "__id__": 111
+      }
+    ]
+  },
+  {
+    "__type__": "SkillLevelPrefabBinding",
+    "level": 10,
+    "prefab": {
+      "__uuid__": "69a2fd22-da2c-4a3e-9cbe-726a25f6d466",
+      "__expectedType__": "cc.Prefab"
+    }
   },
   {
     "__type__": "SkillVisualBinding",
@@ -1660,7 +1672,19 @@
       "__uuid__": "848fb71c-df1c-4254-8c36-141fc6aedca0",
       "__expectedType__": "cc.Prefab"
     },
-    "levelPrefabs": []
+    "levelPrefabs": [
+      {
+        "__id__": 116
+      }
+    ]
+  },
+  {
+    "__type__": "SkillLevelPrefabBinding",
+    "level": 10,
+    "prefab": {
+      "__uuid__": "116ecabd-b73a-415a-90c4-d069b12bf596",
+      "__expectedType__": "cc.Prefab"
+    }
   },
   {
     "__type__": "SkillVisualBinding",
@@ -1680,7 +1704,7 @@
       "__expectedType__": "cc.Prefab"
     },
     "impactPrefab": {
-      "__uuid__": "a58ddfad-3c57-4100-a41c-fa48094e4bad",
+      "__uuid__": "cb4712b3-8548-4b03-8187-e2003512b8f5",
       "__expectedType__": "cc.Prefab"
     },
     "levelPrefabs": []
@@ -1693,7 +1717,19 @@
       "__expectedType__": "cc.Prefab"
     },
     "impactPrefab": null,
-    "levelPrefabs": []
+    "levelPrefabs": [
+      {
+        "__id__": 120
+      }
+    ]
+  },
+  {
+    "__type__": "SkillLevelPrefabBinding",
+    "level": 10,
+    "prefab": {
+      "__uuid__": "c08083bb-9500-4866-87a2-15856e0d8735",
+      "__expectedType__": "cc.Prefab"
+    }
   },
   {
     "__type__": "SkillVisualBinding",
@@ -1716,7 +1752,19 @@
       "__expectedType__": "cc.Prefab"
     },
     "impactPrefab": null,
-    "levelPrefabs": []
+    "levelPrefabs": [
+      {
+        "__id__": 123
+      }
+    ]
+  },
+  {
+    "__type__": "SkillLevelPrefabBinding",
+    "level": 10,
+    "prefab": {
+      "__uuid__": "ee82a109-f52c-4d8c-9baa-4af200d1886b",
+      "__expectedType__": "cc.Prefab"
+    }
   },
   {
     "__type__": "bb294fbmVtEQpXp7XW4/6vb",
@@ -1727,7 +1775,7 @@
     },
     "_enabled": true,
     "__prefab": {
-      "__id__": 121
+      "__id__": 125
     },
     "_id": ""
   },
@@ -1746,16 +1794,16 @@
     "fileId": "c46/YsCPVOJYA4mWEpNYRx",
     "targetOverrides": [
       {
-        "__id__": 123
+        "__id__": 127
       },
       {
-        "__id__": 126
+        "__id__": 130
       },
       {
-        "__id__": 129
+        "__id__": 133
       },
       {
-        "__id__": 132
+        "__id__": 136
       }
     ],
     "nestedPrefabInstanceRoots": [
@@ -1776,7 +1824,7 @@
       "__id__": 26
     },
     "sourceInfo": {
-      "__id__": 124
+      "__id__": 128
     },
     "propertyPath": [
       "point"
@@ -1785,7 +1833,7 @@
       "__id__": 26
     },
     "targetInfo": {
-      "__id__": 125
+      "__id__": 129
     }
   },
   {
@@ -1806,46 +1854,46 @@
       "__id__": 16
     },
     "sourceInfo": {
-      "__id__": 127
-    },
-    "propertyPath": [
-      "point"
-    ],
-    "target": {
-      "__id__": 16
-    },
-    "targetInfo": {
-      "__id__": 128
-    }
-  },
-  {
-    "__type__": "cc.TargetInfo",
-    "localID": [
-      "ca9UsKCwFHnpSSFV5foRqA"
-    ]
-  },
-  {
-    "__type__": "cc.TargetInfo",
-    "localID": [
-      "aeKJkhXXFNO4FlMN9+sasK"
-    ]
-  },
-  {
-    "__type__": "cc.TargetOverrideInfo",
-    "source": {
-      "__id__": 49
-    },
-    "sourceInfo": {
-      "__id__": 130
-    },
-    "propertyPath": [
-      "point"
-    ],
-    "target": {
-      "__id__": 49
-    },
-    "targetInfo": {
       "__id__": 131
+    },
+    "propertyPath": [
+      "point"
+    ],
+    "target": {
+      "__id__": 16
+    },
+    "targetInfo": {
+      "__id__": 132
+    }
+  },
+  {
+    "__type__": "cc.TargetInfo",
+    "localID": [
+      "ca9UsKCwFHnpSSFV5foRqA"
+    ]
+  },
+  {
+    "__type__": "cc.TargetInfo",
+    "localID": [
+      "aeKJkhXXFNO4FlMN9+sasK"
+    ]
+  },
+  {
+    "__type__": "cc.TargetOverrideInfo",
+    "source": {
+      "__id__": 49
+    },
+    "sourceInfo": {
+      "__id__": 134
+    },
+    "propertyPath": [
+      "point"
+    ],
+    "target": {
+      "__id__": 49
+    },
+    "targetInfo": {
+      "__id__": 135
     }
   },
   {
@@ -1866,7 +1914,7 @@
       "__id__": 72
     },
     "sourceInfo": {
-      "__id__": 133
+      "__id__": 137
     },
     "propertyPath": [
       "point"
@@ -1875,7 +1923,7 @@
       "__id__": 72
     },
     "targetInfo": {
-      "__id__": 134
+      "__id__": 138
     }
   },
   {

@@ -1,0 +1,134 @@
+{
+  "ver": "1.0.24",
+  "importer": "image",
+  "imported": true,
+  "uuid": "72638982-59e5-4ec8-a564-6d33366c9a22",
+  "files": [
+    ".json",
+    ".png"
+  ],
+  "subMetas": {
+    "6c48a": {
+      "importer": "texture",
+      "uuid": "72638982-59e5-4ec8-a564-6d33366c9a22@6c48a",
+      "displayName": "golden_saoba_06",
+      "id": "6c48a",
+      "name": "texture",
+      "userData": {
+        "wrapModeS": "repeat",
+        "wrapModeT": "repeat",
+        "minfilter": "nearest",
+        "magfilter": "nearest",
+        "mipfilter": "none",
+        "anisotropy": 0,
+        "isUuid": true,
+        "imageUuidOrDatabaseUri": "72638982-59e5-4ec8-a564-6d33366c9a22",
+        "visible": false
+      },
+      "ver": "1.0.22",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    },
+    "f9941": {
+      "importer": "sprite-frame",
+      "uuid": "72638982-59e5-4ec8-a564-6d33366c9a22@f9941",
+      "displayName": "golden_saoba_06",
+      "id": "f9941",
+      "name": "spriteFrame",
+      "userData": {
+        "trimType": "auto",
+        "trimThreshold": 1,
+        "rotated": false,
+        "offsetX": 0,
+        "offsetY": -1,
+        "trimX": 6,
+        "trimY": 5,
+        "width": 52,
+        "height": 56,
+        "rawWidth": 64,
+        "rawHeight": 64,
+        "borderTop": 0,
+        "borderBottom": 0,
+        "borderLeft": 0,
+        "borderRight": 0,
+        "packable": true,
+        "pixelsToUnit": 100,
+        "pivotX": 0.5,
+        "pivotY": 0.5,
+        "meshType": 0,
+        "vertices": {
+          "rawPosition": [
+            -26,
+            -28,
+            0,
+            26,
+            -28,
+            0,
+            -26,
+            28,
+            0,
+            26,
+            28,
+            0
+          ],
+          "indexes": [
+            0,
+            1,
+            2,
+            2,
+            1,
+            3
+          ],
+          "uv": [
+            6,
+            59,
+            58,
+            59,
+            6,
+            3,
+            58,
+            3
+          ],
+          "nuv": [
+            0.09375,
+            0.046875,
+            0.90625,
+            0.046875,
+            0.09375,
+            0.921875,
+            0.90625,
+            0.921875
+          ],
+          "minPos": [
+            -26,
+            -28,
+            0
+          ],
+          "maxPos": [
+            26,
+            28,
+            0
+          ]
+        },
+        "isUuid": true,
+        "imageUuidOrDatabaseUri": "72638982-59e5-4ec8-a564-6d33366c9a22@6c48a",
+        "atlasUuid": ""
+      },
+      "ver": "1.0.11",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    }
+  },
+  "userData": {
+    "type": "sprite-frame",
+    "fixAlphaTransparencyArtifacts": true,
+    "hasAlpha": true,
+    "redirect": "72638982-59e5-4ec8-a564-6d33366c9a22@f9941"
+  }
+}

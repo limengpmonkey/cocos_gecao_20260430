@@ -1059,7 +1059,7 @@
     ],
     "fallbackSkillCardIcon": null,
     "debugForcedSkillIds": [],
-    "debugForceSingleSkillId": "trash_bag_field",
+    "debugForceSingleSkillId": "cleaning_robot",
     "debugSkillDamageEnabled": true,
     "debugDisableDamageForSingleSkill": false,
     "debugStartAtLevel10": true,

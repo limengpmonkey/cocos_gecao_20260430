@@ -1,0 +1,134 @@
+{
+  "ver": "1.0.24",
+  "importer": "image",
+  "imported": true,
+  "uuid": "38428024-c18a-47b7-9e71-e8a4bed65822",
+  "files": [
+    ".json",
+    ".png"
+  ],
+  "subMetas": {
+    "6c48a": {
+      "importer": "texture",
+      "uuid": "38428024-c18a-47b7-9e71-e8a4bed65822@6c48a",
+      "displayName": "little_girl_falldown_08",
+      "id": "6c48a",
+      "name": "texture",
+      "userData": {
+        "wrapModeS": "repeat",
+        "wrapModeT": "repeat",
+        "minfilter": "nearest",
+        "magfilter": "nearest",
+        "mipfilter": "none",
+        "anisotropy": 0,
+        "isUuid": true,
+        "imageUuidOrDatabaseUri": "38428024-c18a-47b7-9e71-e8a4bed65822",
+        "visible": false
+      },
+      "ver": "1.0.22",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    },
+    "f9941": {
+      "importer": "sprite-frame",
+      "uuid": "38428024-c18a-47b7-9e71-e8a4bed65822@f9941",
+      "displayName": "little_girl_falldown_08",
+      "id": "f9941",
+      "name": "spriteFrame",
+      "userData": {
+        "trimType": "auto",
+        "trimThreshold": 1,
+        "rotated": false,
+        "offsetX": -4.5,
+        "offsetY": -5,
+        "trimX": 6,
+        "trimY": 12,
+        "width": 43,
+        "height": 50,
+        "rawWidth": 64,
+        "rawHeight": 64,
+        "borderTop": 0,
+        "borderBottom": 0,
+        "borderLeft": 0,
+        "borderRight": 0,
+        "packable": true,
+        "pixelsToUnit": 100,
+        "pivotX": 0.5,
+        "pivotY": 0.5,
+        "meshType": 0,
+        "vertices": {
+          "rawPosition": [
+            -21.5,
+            -25,
+            0,
+            21.5,
+            -25,
+            0,
+            -21.5,
+            25,
+            0,
+            21.5,
+            25,
+            0
+          ],
+          "indexes": [
+            0,
+            1,
+            2,
+            2,
+            1,
+            3
+          ],
+          "uv": [
+            6,
+            52,
+            49,
+            52,
+            6,
+            2,
+            49,
+            2
+          ],
+          "nuv": [
+            0.09375,
+            0.03125,
+            0.765625,
+            0.03125,
+            0.09375,
+            0.8125,
+            0.765625,
+            0.8125
+          ],
+          "minPos": [
+            -21.5,
+            -25,
+            0
+          ],
+          "maxPos": [
+            21.5,
+            25,
+            0
+          ]
+        },
+        "isUuid": true,
+        "imageUuidOrDatabaseUri": "38428024-c18a-47b7-9e71-e8a4bed65822@6c48a",
+        "atlasUuid": ""
+      },
+      "ver": "1.0.11",
+      "imported": true,
+      "files": [
+        ".json"
+      ],
+      "subMetas": {}
+    }
+  },
+  "userData": {
+    "type": "sprite-frame",
+    "fixAlphaTransparencyArtifacts": true,
+    "hasAlpha": true,
+    "redirect": "38428024-c18a-47b7-9e71-e8a4bed65822@f9941"
+  }
+}
